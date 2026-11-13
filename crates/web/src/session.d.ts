@@ -11,6 +11,12 @@ export interface Submission {
     presented: boolean;
 }
 
+export interface SessionInfo {
+    ready: boolean;
+    mode: string;
+    connected: boolean;
+}
+
 export interface Session {
     storage?: Storage | undefined;
     journal: Journal;
@@ -20,13 +26,14 @@ export interface Session {
     generation: number;
     surface?: Surface | undefined;
     channel?: BroadcastChannel | undefined;
+    info: any;
     publish: any;
     status: any;
     saving: any;
 }
 
 export const Session: {
-    "new"(publish: any, status: any, saving: any): Session;
+    "new"(publish: any, status: any, saving: any, info: any): Session;
     ready(session: Session): boolean;
     mode(session: Session): string;
     connected(session: Session): boolean;

@@ -8,8 +8,8 @@ mod ui;
 mod webmcp;
 
 use crate::render::Viewport;
-use crate::session::Session;
-use crate::surface::{Surface, Tool};
+use crate::session::{Session, SessionInfo};
+use crate::surface::{BrushSettings, PaintMode, Surface, Tool};
 use crate::ui::Icon;
 use js::{settle, spawn};
 use react::event::PointerEvent as ReactPointerEvent;
@@ -21,7 +21,7 @@ use webapi::{
     AddEventListenerOptions, Event, EventTargetExt, HTMLCanvasElement, KeyboardEvent, WheelEvent,
     broadcast_channel, document, events, resize_observer, window,
 };
-use whiteboard_core::{Command, Drawing, Geometry, Journal, Operation, Point, Style};
+use whiteboard_core::{Brush, Clip, Command, Journal, Operation, Point};
 
 const PALETTE: [&str; 6] = [
     "#243b35", "#3d8065", "#4083bf", "#8062ab", "#d97783", "#e4a13c",
@@ -39,6 +39,13 @@ pub fn App() -> JSX::Element {
     let (color, set_color) = use_state(|| PALETTE[0].to_string());
     let (width, set_width) = use_state(|| 12.0_f64);
     let (filled, set_filled) = use_state(|| false);
+    let (brush_kind, set_brush_kind) = use_state(|| "marker".to_string());
+    let (softness, set_softness) = use_state(|| 0.8_f64);
+    let (grain, set_grain) = use_state(|| 0.5_f64);
+    let (opacity, set_opacity) = use_state(|| 1.0_f64);
+    let (paint_mode, set_paint_mode) = use_state(|| PaintMode::Solid);
+    let (secondary, set_secondary) = use_state(|| "#ffffff".to_string());
+    let (clipping, set_clipping) = use_state(|| None::<Clip>);
     let (view, set_view) = use_state(Viewport::default);
     let (playback, set_playback) = use_state(|| None::<f64>);
     let (panel, set_panel) = use_state(|| None::<&'static str>);
@@ -46,9 +53,18 @@ pub fn App() -> JSX::Element {
     let (text, set_text) = use_state(String::new);
     let (server_url, set_server_url) = use_state(String::new);
     let (room_id, set_room_id) = use_state(|| "studio".to_string());
+    let (session_info, set_session_info) = use_state(SessionInfo::default);
     let canvas = use_ref(None::<&'static HTMLCanvasElement>);
     let surface = use_ref(None::<Rc<Surface>>);
-    let session = use_ref(Rc::new(Session::new(set_snapshot, set_status, set_saving))).current();
+    let (session, _) = use_state(move || {
+        Rc::new(Session::new(
+            set_snapshot,
+            set_status,
+            set_saving,
+            set_session_info,
+        ))
+    });
+    let session = Rc::clone(session);
 
     let mounting = Rc::clone(&session);
     use_effect(
@@ -192,10 +208,42 @@ pub fn App() -> JSX::Element {
     use_effect(
         move || {
             if let Some(surface) = surface.current() {
-                surface.configure(*tool, color, *width, *filled);
+                let ink = match brush_kind.as_str() {
+                    "soft" => Brush::Soft {
+                        softness: *softness,
+                    },
+                    "textured" => Brush::Textured {
+                        grain: *grain,
+                        seed: 42,
+                    },
+                    _ => Brush::Marker,
+                };
+                surface.configure(BrushSettings {
+                    tool: *tool,
+                    color: color.clone(),
+                    secondary: secondary.clone(),
+                    width: *width,
+                    filled: *filled,
+                    opacity: *opacity,
+                    ink,
+                    paint: *paint_mode,
+                    clip: clipping.clone(),
+                });
             }
         },
-        Some(&(*tool, color.as_str(), *width, *filled)),
+        Some(&(
+            *tool,
+            color.as_str(),
+            *width,
+            *filled,
+            brush_kind.as_str(),
+            *softness,
+            *grain,
+            *opacity,
+            *paint_mode,
+            secondary.as_str(),
+            clipping,
+        )),
     );
     let keyboard_session = Rc::clone(&session);
     use_effect(
@@ -254,11 +302,11 @@ pub fn App() -> JSX::Element {
         Some(&()),
     );
 
-    let states = tools::use_tools(Rc::clone(&session));
+    let states = tools::use_tools(Rc::clone(&session), session_info.ready);
     let agent_ready = states.iter().all(|state| state.registered);
     let agent_available = states.iter().any(|state| state.supported)
         && states.iter().all(|state| state.error.is_none());
-    let ready = session.ready();
+    let ready = session_info.ready;
     let down = move |event: &ReactPointerEvent<HTMLCanvasElement>| {
         if !ready
             || playback.is_some()
@@ -339,9 +387,9 @@ pub fn App() -> JSX::Element {
             <header className="topbar">
                 <a className="brand" href="./" aria-label="AgentWhiteboard home"><span className="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 23C7 9 11 7 14 18s7 5 12-10" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round"/></svg></span><span>{"Agent"}<span className="brand-light">{"Whiteboard"}</span></span></a>
                 <span className="header-divider"/><div className="board-title">{"A space for your next idea"}<span>{"HUMAN CURIOSITY. AGENT POSSIBILITY."}</span></div>
-                <div className="top-actions"><span className={if session.connected(){"save-status"}else{"save-status disconnected"}} data-testid="storage-status"><i/>{if *saving>0{"Saving…"}else{status.as_str()}}</span><button className="outline-button connect-button" onClick={move |_|set_panel.set(if *panel==Some("connect"){None}else{Some("connect")})}><Icon name={"link"}/>{if session.mode()=="server"{"Shared room"}else{"Connect a room"}}</button><button className="dark-button" disabled={!ready} onClick={move |_|set_panel.set(if *panel==Some("export"){None}else{Some("export")})}><Icon name={"download"}/><span>{"Export"}</span></button></div>
+                <div className="top-actions"><span className={if session_info.connected{"save-status"}else{"save-status disconnected"}} data-testid="storage-status"><i/>{if *saving>0{"Saving…"}else{status.as_str()}}</span><button className="outline-button connect-button" onClick={move |_|set_panel.set(if *panel==Some("connect"){None}else{Some("connect")})}><Icon name={"link"}/>{if session_info.mode=="server"{"Shared room"}else{"Connect a room"}}</button><button className="dark-button" disabled={!ready} onClick={move |_|set_panel.set(if *panel==Some("export"){None}else{Some("export")})}><Icon name={"download"}/><span>{"Export"}</span></button></div>
             </header>
-            <div className="board-menu"><div className="history-controls"><button aria-label="Undo" title="Undo (⌘/Ctrl Z)" disabled={!ready||!snapshot.can_undo||playback.is_some()} onClick={move |_|ui::edit(Rc::clone(&undo_session),vec![Operation::Undo],set_problem,set_failed)}><Icon name={"undo"}/></button><button aria-label="Redo" title="Redo (⌘/Ctrl Shift Z)" disabled={!ready||!snapshot.can_redo||playback.is_some()} onClick={move |_|ui::edit(Rc::clone(&redo_session),vec![Operation::Redo],set_problem,set_failed)}><Icon name={"redo"}/></button><span/><button className={if playback.is_some(){"replay-button playing"}else{"replay-button"}} disabled={!ready||snapshot.sequence==0} onClick={move |_|{if playback.is_some(){if let Ok(surface)=replaying_session.surface(){surface.stop_replay();}}else{ui::replay(Rc::clone(&replaying_session),set_problem);}}}><Icon name={"replay"}/>{if playback.is_some(){"Stop replay"}else{"Replay drawing"}}</button></div><div className="menu-right"><span className="board-kind">{if session.mode()=="server"{"SHARED CANVAS"}else{"YOUR PERSONAL CANVAS"}}</span><button className="agent-button" onClick={move |_|set_panel.set(if *panel==Some("agent"){None}else{Some("agent")})}><span className={if agent_ready{"agent-dot ready"}else{"agent-dot"}}/><span data-testid="agent-status">{if agent_ready{"Agent ready · 7 tools"}else if agent_available{"Registering tools…"}else{"WebMCP unavailable"}}</span></button></div></div>
+            <div className="board-menu"><div className="history-controls"><button aria-label="Undo" title="Undo (⌘/Ctrl Z)" disabled={!ready||!snapshot.can_undo||playback.is_some()} onClick={move |_|ui::edit(Rc::clone(&undo_session),vec![Operation::Undo],set_problem,set_failed)}><Icon name={"undo"}/></button><button aria-label="Redo" title="Redo (⌘/Ctrl Shift Z)" disabled={!ready||!snapshot.can_redo||playback.is_some()} onClick={move |_|ui::edit(Rc::clone(&redo_session),vec![Operation::Redo],set_problem,set_failed)}><Icon name={"redo"}/></button><span/><button className={if playback.is_some(){"replay-button playing"}else{"replay-button"}} disabled={!ready||snapshot.sequence==0} onClick={move |_|{if playback.is_some(){if let Ok(surface)=replaying_session.surface(){surface.stop_replay();}}else{ui::replay(Rc::clone(&replaying_session),set_problem);}}}><Icon name={"replay"}/>{if playback.is_some(){"Stop replay"}else{"Replay drawing"}}</button></div><div className="menu-right"><button className="painting-button" onClick={move |_|set_panel.set(if *panel==Some("painting"){None}else{Some("painting")})}>{"Brush & paint"}</button><span className="board-kind">{if session.mode()=="server"{"SHARED CANVAS"}else{"YOUR PERSONAL CANVAS"}}</span><button className="agent-button" onClick={move |_|set_panel.set(if *panel==Some("agent"){None}else{Some("agent")})}><span className={if agent_ready{"agent-dot ready"}else{"agent-dot"}}/><span data-testid="agent-status">{if agent_ready{"Agent ready · 7 tools"}else if agent_available{"Registering tools…"}else{"WebMCP unavailable"}}</span></button></div></div>
             {problem.as_ref().map(|message|jsx!{<div className="error-banner" role="alert"><span>{message}</span>{failed.as_ref().map(|command|{let retry_session=Rc::clone(&retry_session);let command=command.clone();jsx!{<><button onClick={move |_|ui::submit(Rc::clone(&retry_session),command.clone(),set_problem,set_failed)}>{"Retry save"}</button><button onClick={move |_|{set_failed.set(None);if let Some(surface)=surface.current(){surface.clear_draft();}set_problem.set(None);}}>{"Discard draft"}</button></>}})}{failed.is_none().then(||jsx!{<button aria-label="Dismiss error" onClick={move |_|set_problem.set(None)}><Icon name={"close"}/></button>})}</div>})}
             <main className="board-area">
                 <canvas className={format!("drawing-canvas tool-{}",tool.class())} aria-label="Whiteboard drawing" role="img" tabIndex={0} ref={canvas} onPointerDown={down} onPointerMove={moved} onPointerUp={up} onPointerCancel={move |_|cancel()} onLostPointerCapture={move |_|cancel()}/>
@@ -350,7 +398,8 @@ pub fn App() -> JSX::Element {
                 <section className="ink-tray" aria-label="Marker settings"><div className="colors">{PALETTE.into_iter().map(|value|jsx!{<button key={value} aria-label={format!("Ink {value}")} aria-pressed={color==value} style={CSSProperties::new().set("--ink",value)} onClick={move |_|set_color.set(value.into())}><span/></button>}).collect::<Vec<_>>()}<label className="custom-color" title="Custom ink color"><span>{"+"}</span><input type="color" aria-label="Custom ink color" value={color.clone()} onChange={move|event|set_color.set(event.current_target().value())}/></label></div><span className="tray-divider"/><label className="width-control"><span>{"Stroke"}</span><input aria-label="Stroke width" type="range" min="2" max="80" value={*width} onChange={move|event|set_width.set(event.current_target().value_as_number())}/><span className="width-sample" style={CSSProperties::new().set("--width",format!("{}px",(width/4.0).max(3.0))).set("--ink",color.clone())}/></label>{(*tool==Tool::Rectangle||*tool==Tool::Ellipse).then(||jsx!{<label className="fill-control"><input type="checkbox" checked={*filled} onChange={move|event|set_filled.set(event.current_target().checked())}/>{"Fill"}</label>})}</section>
                 <div className="zoom-controls"><button aria-label="Zoom out" onClick={move |_|{if let Some(surface)=surface.current(){let _=surface.set_view(Viewport{zoom:(view.zoom/1.25).max(0.2),..*view});}}}>{"−"}</button><span>{format!("{}%",(view.zoom*100.0).round())}</span><button aria-label="Zoom in" onClick={move |_|{if let Some(surface)=surface.current(){let _=surface.set_view(Viewport{zoom:(view.zoom*1.25).min(8.0),..*view});}}}>{"+"}</button><button aria-label="Fit board" title="Fit board" onClick={move |_|{if let Some(surface)=surface.current(){let _=surface.set_view(Viewport::default());}}}><Icon name={"fit"}/></button></div>
                 {playback.map(|progress|jsx!{<div className="playback-hud" role="status"><span className="pulse"/>{"Watching your idea take shape"}<span>{format!("{}%",(progress*100.0).round())}</span><div style={CSSProperties::new().set("width",format!("{}%",progress*100.0))}/></div>})}
-                {text_at.as_ref().map(|point|{let point=point.clone();let session=Rc::clone(&text_session);jsx!{<form className="text-editor" onSubmit={move|event|{event.prevent_default();if !text.trim().is_empty(){ui::edit(Rc::clone(&session),vec![Operation::Create{id:window.crypto().random_uuid(),drawing:Drawing{geometry:Geometry::Text{x:point.x,y:point.y,text:text.clone(),size:(width*6.0).max(48.0)},style:Style{stroke:color.clone(),..Style::default()},transform:[1.0,0.0,0.0,1.0,0.0,0.0]}}],set_problem,set_failed);set_text_at.set(None);}}}><label>{"Add your words"}<textarea aria-label="Board text" autoFocus={true} value={text.clone()} onChange={move|event|set_text.set(event.current_target().value())} placeholder="A thought worth keeping…"/></label><div><button type="button" onClick={move |_|set_text_at.set(None)}>{"Cancel"}</button><button className="dark-button" type="submit">{"Place text"}</button></div></form>}})}
+                {text_at.as_ref().map(|point|{let point=point.clone();let session=Rc::clone(&text_session);jsx!{<form className="text-editor" onSubmit={move|event|{event.prevent_default();if !text.trim().is_empty(){ui::edit(Rc::clone(&session),vec![Operation::Create{id:window.crypto().random_uuid(),drawing:surface.current().expect("mounted drawing surface").text_drawing(point.clone(),text.clone(),(width*6.0).max(48.0))}],set_problem,set_failed);set_text_at.set(None);}}}><label>{"Add your words"}<textarea aria-label="Board text" autoFocus={true} value={text.clone()} onChange={move|event|set_text.set(event.current_target().value())} placeholder="A thought worth keeping…"/></label><div><button type="button" onClick={move |_|set_text_at.set(None)}>{"Cancel"}</button><button className="dark-button" type="submit">{"Place text"}</button></div></form>}})}
+                {(*panel==Some("painting")).then(||jsx!{<section className="popover painting-panel" aria-label="Brush and paint settings"><span className="eyebrow">{"A LITTLE MORE EXPRESSION"}</span><h2>{"Brush & paint"}</h2><label>{"Brush"}<select aria-label="Brush type" value={brush_kind.clone()} onChange={move |event|set_brush_kind.set(event.current_target().value())}><option value="marker">{"Marker"}</option><option value="soft">{"Soft brush"}</option><option value="textured">{"Textured brush"}</option></select></label>{(brush_kind=="soft").then(||jsx!{<label>{"Softness"}<input aria-label="Brush softness" type="range" min="0" max="1" step="0.05" value={*softness} onChange={move |event|set_softness.set(event.current_target().value_as_number())}/></label>})}{(brush_kind=="textured").then(||jsx!{<label>{"Grain"}<input aria-label="Brush grain" type="range" min="0.05" max="1" step="0.05" value={*grain} onChange={move |event|set_grain.set(event.current_target().value_as_number())}/></label>})}<label>{"Opacity"}<input aria-label="Paint opacity" type="range" min="0.05" max="1" step="0.05" value={*opacity} onChange={move |event|set_opacity.set(event.current_target().value_as_number())}/></label><label>{"Paint"}<select aria-label="Paint type" value={match *paint_mode { PaintMode::Solid=>"solid",PaintMode::Linear=>"linear",PaintMode::Radial=>"radial" }} onChange={move |event|set_paint_mode.set(match event.current_target().value().as_str(){"linear"=>PaintMode::Linear,"radial"=>PaintMode::Radial,_=>PaintMode::Solid})}><option value="solid">{"Solid color"}</option><option value="linear">{"Linear gradient"}</option><option value="radial">{"Radial gradient"}</option></select></label>{(*paint_mode!=PaintMode::Solid).then(||jsx!{<label>{"End color"}<input type="color" aria-label="Gradient end color" value={secondary.clone()} onChange={move |event|set_secondary.set(event.current_target().value())}/></label>})}<p>{"Soft and textured brushes apply to pen strokes. Select a path shape to keep new marks inside its outline."}</p><button className="outline-button" onClick={move |_|{if clipping.is_some(){set_clipping.set(None);}else if let Some(surface)=surface.current(){match surface.selected_clip(){Ok(clip)=>{set_clipping.set(Some(clip));set_tool.set(Tool::Pen);},Err(error)=>set_problem.set(Some(error))}}}}>{if clipping.is_some(){"Clear brush clip"}else{"Clip brush to selection"}}</button></section>})}
                 {(*panel==Some("export")).then(||{let session=Rc::clone(&session);jsx!{<div className="popover export-menu"><span className="eyebrow">{"TAKE YOUR IDEAS WITH YOU"}</span>{[("png","PNG image","A picture of your board"),("svg","SVG artwork","Crisp, editable vector paths"),("json","Board file","Drawing, history, and undo state")].into_iter().map(|(format,title,description)|{let session=Rc::clone(&session);jsx!{<button key={format} onClick={move |_|{ui::export(Rc::clone(&session),format,set_problem);set_panel.set(None);}}>{title}<span>{description}</span></button>}}).collect::<Vec<_>>()}</div>}})}
                 {(*panel==Some("agent")).then(||jsx!{<div className="popover agent-panel"><span className="eyebrow">{"A NEW KIND OF DRAWING PARTNER"}</span><h2>{"Give your agent a pen."}</h2><p>{"Ask a WebMCP-compatible agent:"}</p><blockquote>{"“Draw a little duck on this whiteboard, then replay how you drew it.”"}</blockquote><p>{"Agents have the same canvas: freehand strokes, curves, text, erasing, undo and redo. They can see the result and keep refining it."}</p><small>{if agent_ready{"Native WebMCP tools are registered in this browser."}else{"Use a browser with WebMCP enabled and a compatible agent client. Human drawing works here either way."}}</small></div>})}
                 {(*panel==Some("connect")).then(||jsx!{<form className="popover connect-panel" onSubmit={move|event|{event.prevent_default();if let Err(error)=ui::connect(server_url,room_id){set_problem.set(Some(error));}}}><span className="eyebrow">{"ONE CANVAS. MORE POSSIBILITIES."}</span><h2>{"Draw together."}</h2><p>{"Open your hosted whiteboard server to share a canvas across machines."}</p><label>{"Server address"}<input aria-label="Server address" required={true} type="url" placeholder="https://whiteboard.your-tailnet.ts.net" value={server_url.clone()} onChange={move|event|set_server_url.set(event.current_target().value())}/></label><label>{"Room"}<input aria-label="Room name" required={true} value={room_id.clone()} onChange={move|event|set_room_id.set(event.current_target().value())}/></label><button type="submit" className="dark-button">{"Open shared room ↗"}</button></form>})}

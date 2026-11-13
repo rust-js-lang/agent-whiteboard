@@ -16,6 +16,21 @@ pub struct Submission {
     pub current_sequence: u32,
     pub presented: bool,
 }
+#[derive(Clone, Copy, PartialEq)]
+pub struct SessionInfo {
+    pub ready: bool,
+    pub mode: &'static str,
+    pub connected: bool,
+}
+impl Default for SessionInfo {
+    fn default() -> Self {
+        Self {
+            ready: false,
+            mode: "browser",
+            connected: true,
+        }
+    }
+}
 pub struct Session {
     storage: RefCell<Option<Storage>>,
     journal: RefCell<Journal>,
@@ -25,6 +40,7 @@ pub struct Session {
     generation: Cell<u32>,
     surface: RefCell<Option<Rc<Surface>>>,
     channel: RefCell<Option<&'static BroadcastChannel>>,
+    info: &'static Dispatch<SetStateAction<SessionInfo>>,
     publish: &'static Dispatch<SetStateAction<Snapshot>>,
     status: &'static Dispatch<SetStateAction<String>>,
     saving: &'static Dispatch<SetStateAction<u32>>,
@@ -34,6 +50,7 @@ impl Session {
         publish: &'static Dispatch<SetStateAction<Snapshot>>,
         status: &'static Dispatch<SetStateAction<String>>,
         saving: &'static Dispatch<SetStateAction<u32>>,
+        info: &'static Dispatch<SetStateAction<SessionInfo>>,
     ) -> Self {
         Self {
             storage: RefCell::new(None),
@@ -44,10 +61,18 @@ impl Session {
             generation: Cell::new(0),
             surface: RefCell::new(None),
             channel: RefCell::new(None),
+            info,
             publish,
             status,
             saving,
         }
+    }
+    fn publish_info(&self) {
+        self.info.set(SessionInfo {
+            ready: self.ready(),
+            mode: self.mode(),
+            connected: self.connected(),
+        });
     }
     pub fn ready(&self) -> bool {
         self.storage.borrow().is_some()
@@ -114,6 +139,7 @@ impl Session {
         self.mode.set(stored.mode);
         self.connected.set(true);
         self.status.set(stored.status.into());
+        self.publish_info();
         *self.journal.borrow_mut() = stored.journal;
         let snapshot = self.snapshot();
         let surface = self.surface.borrow().clone();
@@ -135,6 +161,7 @@ impl Session {
             Err(error) => {
                 self.connected.set(false);
                 self.status.set("Disconnected".into());
+                self.publish_info();
                 Err(error)
             }
         }

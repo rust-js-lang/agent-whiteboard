@@ -3,11 +3,15 @@
 /** Browser drawing uses the canonical paths produced by board-core. */
 import {
   drawingSerialize_serialize,
+  inverse,
   maskData,
   pathData,
+  segmentData,
 } from "../../board-core/src/lib.js";
+import { Gradient, inkLayers } from "../../board-core/src/painting.js";
 import {
   $byteLen,
+  $debugParseError,
   $displayF64,
   $displayJsonError,
   $f64Max,
@@ -15,11 +19,16 @@ import {
   $floatEuclid,
   $json,
   $lines,
+  $live,
   $max,
+  $parseInt,
   $round,
   $settle,
+  $strSlice,
   $toJson,
   $try,
+  $unwindsOn,
+  $unwrapOk,
 } from "@rust-js/std";
 
 export function viewportSerialize_serialize(viewport, json) {
@@ -148,6 +157,33 @@ export const Renderer = {
     cache.set(key, path);
     return { TAG: "Ok", _0: path };
   },
+  ink(renderer, drawing) {
+    const result = $toJson(drawing, drawingSerialize_serialize, false);
+    const result$1 =
+      result.TAG === "Err" ? { TAG: "Err", _0: $displayJsonError(result._0) } : result;
+    if (result$1.TAG === "Err") {
+      return result$1;
+    }
+    const key = result$1._0;
+    let paths = renderer.ink.get(key);
+    if (paths != null) {
+      return { TAG: "Ok", _0: paths.map((item) => [item[0], item[1]]) };
+    }
+    const result$2 = inkLayers(drawing);
+    if (result$2.TAG === "Err") {
+      return result$2;
+    }
+    paths = result$2._0.map((layer) => [new Path2D(layer.path), layer.opacity]);
+    const cache = renderer.ink;
+    if (cache.size >= 500) {
+      cache.clear();
+    }
+    cache.set(
+      key,
+      paths.map((item) => [item[0], item[1]]),
+    );
+    return { TAG: "Ok", _0: paths };
+  },
   geometry(renderer, ctx, element) {
     const drawing = element.drawing;
     const style = drawing.style;
@@ -155,15 +191,24 @@ export const Renderer = {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.lineWidth = style.width;
-    ctx.strokeStyle = style.stroke;
-    ctx.fillStyle = style.fill ?? style.stroke;
+    if (drawing.clip != null) {
+      transform(ctx, drawing.clip.transform.slice());
+      ctx.clip(new Path2D(segmentData(drawing.clip.segments)), "nonzero");
+      transform(ctx, inverse(drawing.clip.transform.slice()));
+    }
+    setPaint(ctx, style.stroke, true);
+    setPaint(ctx, style.fill ?? style.stroke, false);
     if (drawing.geometry.TAG === "Stroke") {
-      ctx.fillStyle = style.stroke;
-      const result = Renderer.path(renderer, drawing);
+      setPaint(ctx, style.stroke, false);
+      const result = Renderer.ink(renderer, drawing);
       if (result.TAG === "Err") {
         return result;
       }
-      ctx.fill(result._0, "nonzero");
+      for (const [path, opacity] of result._0) {
+        ctx.globalAlpha = opacity;
+        ctx.fill(path, "nonzero");
+      }
+      ctx.globalAlpha = 1;
     } else if (drawing.geometry.TAG === "Path") {
       const result$1 = Renderer.path(renderer, drawing);
       if (result$1.TAG === "Err") {
@@ -177,7 +222,7 @@ export const Renderer = {
     } else {
       ctx.font = `${$displayF64(drawing.geometry.size)}px 'DM Sans', sans-serif`;
       ctx.textBaseline = "alphabetic";
-      ctx.fillStyle = style.stroke;
+      setPaint(ctx, style.stroke, false);
       for (const [index, line] of drawing.geometry.text.split("\n").entries()) {
         ctx.fillText(
           line,
@@ -229,7 +274,10 @@ export const Renderer = {
     }
     let layer;
     for (const element of snapshot.elements) {
-      const isolated = element.masks.length !== 0 || element.drawing.style.opacity < 1;
+      const isolated =
+        element.masks.length !== 0 ||
+        element.drawing.style.opacity < 1 ||
+        element.drawing.style.brush !== "Marker";
       let destination;
       if (isolated) {
         layer ??= newCanvas(width, height);
@@ -302,7 +350,7 @@ export async function capture(snapshot, bounds, maxSize) {
   const scale = $f64Min(max / region.width, max / region.height);
   const canvas = newCanvas(region.width * scale, region.height * scale);
   const result = Renderer.paint(
-    { paths: new Map() },
+    { paths: new Map(), ink: new Map() },
     canvas,
     snapshot,
     {
@@ -440,7 +488,83 @@ export function hit(snapshot, point, tolerance) {
                 : value.drawing.geometry.TAG === "Text"
                   ? { ...value.drawing.geometry }
                   : value.drawing.geometry,
-          style: { ...value.drawing.style },
+          clip:
+            value.drawing.clip == null
+              ? value.drawing.clip
+              : {
+                  ...value.drawing.clip,
+                  segments: value.drawing.clip.segments.map((item) =>
+                    item.TAG === "M"
+                      ? { ...item }
+                      : item.TAG === "L"
+                        ? { ...item }
+                        : item.TAG === "Q"
+                          ? { ...item }
+                          : item.TAG === "C"
+                            ? { ...item }
+                            : item,
+                  ),
+                  transform: value.drawing.clip.transform.slice(),
+                },
+          style: {
+            ...value.drawing.style,
+            stroke:
+              value.drawing.style.stroke.TAG === "Color"
+                ? { ...value.drawing.style.stroke }
+                : value.drawing.style.stroke.TAG === "Gradient"
+                  ? {
+                      ...value.drawing.style.stroke,
+                      _0:
+                        value.drawing.style.stroke._0.TAG === "Linear"
+                          ? {
+                              ...value.drawing.style.stroke._0,
+                              stops: value.drawing.style.stroke._0.stops.map((item) => ({
+                                ...item,
+                              })),
+                            }
+                          : value.drawing.style.stroke._0.TAG === "Radial"
+                            ? {
+                                ...value.drawing.style.stroke._0,
+                                stops: value.drawing.style.stroke._0.stops.map((item) => ({
+                                  ...item,
+                                })),
+                              }
+                            : value.drawing.style.stroke._0,
+                    }
+                  : value.drawing.style.stroke,
+            fill:
+              value.drawing.style.fill == null
+                ? value.drawing.style.fill
+                : value.drawing.style.fill.TAG === "Color"
+                  ? { ...value.drawing.style.fill }
+                  : value.drawing.style.fill.TAG === "Gradient"
+                    ? {
+                        ...value.drawing.style.fill,
+                        _0:
+                          value.drawing.style.fill._0.TAG === "Linear"
+                            ? {
+                                ...value.drawing.style.fill._0,
+                                stops: value.drawing.style.fill._0.stops.map((item) => ({
+                                  ...item,
+                                })),
+                              }
+                            : value.drawing.style.fill._0.TAG === "Radial"
+                              ? {
+                                  ...value.drawing.style.fill._0,
+                                  stops: value.drawing.style.fill._0.stops.map((item) => ({
+                                    ...item,
+                                  })),
+                                }
+                              : value.drawing.style.fill._0,
+                      }
+                    : value.drawing.style.fill,
+            brush:
+              value.drawing.style.brush.TAG === "Soft"
+                ? { ...value.drawing.style.brush }
+                : value.drawing.style.brush.TAG === "Textured"
+                  ? { ...value.drawing.style.brush }
+                  : value.drawing.style.brush,
+          },
           transform: value.drawing.transform.slice(),
         },
         masks: value.masks.map((item) => ({
@@ -460,11 +584,95 @@ function escape(text) {
 function matrixText(matrix) {
   return matrix.map((n) => $displayF64(n)).join(" ");
 }
+function stopColor(stop) {
+  const r = $unwrapOk($parseInt($strSlice(stop.color, 1, 3), 0, 255, 16), "validated red", (e) =>
+    $debugParseError(e, "ParseIntError"),
+  );
+  const g = $unwrapOk($parseInt($strSlice(stop.color, 3, 5), 0, 255, 16), "validated green", (e) =>
+    $debugParseError(e, "ParseIntError"),
+  );
+  const b = $unwrapOk($parseInt($strSlice(stop.color, 5, 7), 0, 255, 16), "validated blue", (e) =>
+    $debugParseError(e, "ParseIntError"),
+  );
+  return `rgba(${r},${g},${b},${$displayF64(stop.opacity)})`;
+}
+function setPaint(ctx, paint, stroke) {
+  if (paint.TAG === "Color") {
+    if (stroke) {
+      ctx.strokeStyle = paint._0;
+    } else {
+      ctx.fillStyle = paint._0;
+    }
+  } else {
+    const gradient =
+      paint._0.TAG === "Linear"
+        ? ctx.createLinearGradient(paint._0.x0, paint._0.y0, paint._0.x1, paint._0.y1)
+        : ctx.createRadialGradient(
+            paint._0.cx,
+            paint._0.cy,
+            0,
+            paint._0.cx,
+            paint._0.cy,
+            paint._0.radius,
+          );
+    for (const stop of Gradient.stops(paint._0)) {
+      gradient.addColorStop(stop.offset, stopColor(stop));
+    }
+    if (stroke) {
+      ctx.strokeStyle = gradient;
+    } else {
+      ctx.fillStyle = gradient;
+    }
+  }
+}
+function svgPaint(paint, id, definitions) {
+  if (paint.TAG === "Color") {
+    return paint._0;
+  } else {
+    let tag;
+    let attributes;
+    if (paint._0.TAG === "Linear") {
+      tag = "linearGradient";
+      attributes = `x1="${$displayF64(paint._0.x0)}" y1="${$displayF64(paint._0.y0)}" x2="${$displayF64(paint._0.x1)}" y2="${$displayF64(paint._0.y1)}"`;
+    } else {
+      tag = "radialGradient";
+      attributes = `cx="${$displayF64(paint._0.cx)}" cy="${$displayF64(paint._0.cy)}" r="${$displayF64(paint._0.radius)}"`;
+    }
+    definitions.value += `<defs><${tag} id="${id}" gradientUnits="userSpaceOnUse" ${attributes}>`;
+    for (const stop of Gradient.stops(paint._0)) {
+      definitions.value += `<stop offset="${$displayF64(stop.offset)}" stop-color="${stop.color}" stop-opacity="${$displayF64(stop.opacity)}"/>`;
+    }
+    definitions.value += `</${tag}></defs>`;
+    return `url(#${id})`;
+  }
+}
 export function svg(snapshot) {
   let body = "";
   for (const element of snapshot.elements) {
     const drawing = element.drawing;
     const style = drawing.style;
+    const definitions = { value: body };
+    const strokePaint = svgPaint(style.stroke, `stroke-${element.id}`, definitions);
+    body = definitions.value;
+    function map(paint) {
+      const definitions = { value: body };
+      try {
+        return svgPaint(paint, `fill-${element.id}`, definitions);
+      } catch (error) {
+        throw $unwindsOn(error);
+      } finally {
+        if ($live()) {
+          body = definitions.value;
+        }
+      }
+    }
+    const fillPaint = (style.fill != null ? map(style.fill) : undefined) ?? "none";
+    const clipId = `clip-${element.id}`;
+    if (drawing.clip != null) {
+      const value = segmentData(drawing.clip.segments);
+      const arg = matrixText(drawing.clip.transform.slice());
+      body += `<defs><clipPath id="${clipId}" clipPathUnits="userSpaceOnUse"><path d="${value}" transform="matrix(${arg})"/></clipPath></defs>`;
+    }
     const maskId = `mask-${element.id}`;
     if (element.masks.length !== 0) {
       body += `<defs><mask id="${maskId}" maskUnits="userSpaceOnUse" x="-1000000" y="-1000000" width="2000000" height="2000000"><rect x="-1000000" y="-1000000" width="2000000" height="2000000" fill="white"/>`;
@@ -479,19 +687,33 @@ export function svg(snapshot) {
     }
     const maskAttribute = element.masks.length === 0 ? "" : ` mask="url(#${maskId})"`;
     body += `<g transform="matrix(${matrixText(drawing.transform.slice())})" opacity="${$displayF64(style.opacity)}"${maskAttribute}>`;
-    if (drawing.geometry.TAG === "Text") {
+    if (drawing.clip != null) {
+      body += `<g clip-path="url(#${clipId})">`;
+    }
+    if (drawing.geometry.TAG === "Stroke") {
+      const result = inkLayers(drawing);
+      if (result.TAG === "Err") {
+        return result;
+      }
+      for (const layer of result._0) {
+        body += `<path d="${layer.path}" fill="${strokePaint}" opacity="${$displayF64(layer.opacity)}"/>`;
+      }
+    } else if (drawing.geometry.TAG === "Text") {
       for (const [index, line] of drawing.geometry.text.split("\n").entries()) {
         const arg = escape(line);
-        body += `<text x="${$displayF64(drawing.geometry.x)}" y="${$displayF64(drawing.geometry.y + index * drawing.geometry.size * 1.3)}" font-size="${$displayF64(drawing.geometry.size)}" font-family="DM Sans,sans-serif" fill="${style.stroke}">${arg}</text>`;
+        body += `<text x="${$displayF64(drawing.geometry.x)}" y="${$displayF64(drawing.geometry.y + index * drawing.geometry.size * 1.3)}" font-size="${$displayF64(drawing.geometry.size)}" font-family="DM Sans,sans-serif" fill="${strokePaint}">${arg}</text>`;
       }
     } else {
-      const stroke = drawing.geometry.TAG === "Stroke" ? "none" : style.stroke;
-      const fill = drawing.geometry.TAG === "Stroke" ? style.stroke : (style.fill ?? "none");
+      const stroke = strokePaint;
+      const fill = fillPaint;
       const result = pathData(drawing);
       if (result.TAG === "Err") {
         return result;
       }
       body += `<path d="${result._0}" fill="${fill}" stroke="${stroke}" stroke-width="${$displayF64(style.width)}" stroke-linecap="round" stroke-linejoin="round" fill-rule="nonzero"/>`;
+    }
+    if (drawing.clip != null) {
+      body += "</g>";
     }
     body += "</g>";
   }

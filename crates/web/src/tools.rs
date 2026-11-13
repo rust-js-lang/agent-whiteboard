@@ -64,8 +64,7 @@ fn check(options: &ExecutionOptions) -> Result<(), String> {
         Ok(())
     }
 }
-pub fn use_tools(session: Rc<Session>) -> Vec<ToolState> {
-    let ready = session.ready();
+pub fn use_tools(session: Rc<Session>, ready: bool) -> Vec<ToolState> {
     let reading = Rc::clone(&session);
     let state = use_web_mcp(ToolOptions {
         name: "get_board",
@@ -120,7 +119,7 @@ pub fn use_tools(session: Rc<Session>) -> Vec<ToolState> {
     let applying = Rc::clone(&session);
     let apply = use_web_mcp(ToolOptions {
         name: "apply_operations",
-        description: "Draw and edit freely in one atomic batch. Supply a unique commandId and operations. Create example: {op:'create',id:'bird-wing',drawing:{geometry:{kind:'path',segments:[{op:'M',x:1000,y:1000},{op:'C',cx1:1400,cy1:600,cx2:1700,cy2:1100,x:2100,y:800}]},style:{stroke:'#243b35',width:12,fill:null}}}. Also create stroke points or text, replace/delete with expectedVersion, erase with targets/points/radius, clear with expectedSequence, or standalone undo/redo. World coordinates, no scripts or stamps. Identical commandId retries return the original receipt without drawing twice. Returns after durable acceptance and attempted local presentation.",
+        description: "Draw and edit freely in one atomic batch. Supply a unique commandId and operations. Create example: {op:'create',id:'bird-wing',drawing:{geometry:{kind:'path',segments:[{op:'M',x:1000,y:1000},{op:'C',cx1:1400,cy1:600,cx2:1700,cy2:1100,x:2100,y:800}]},style:{stroke:'#243b35',width:12,fill:null}}}. Also create stroke points or text, replace/delete with expectedVersion, erase with targets/points/radius, clear with expectedSequence, or standalone undo/redo. Paint stroke/fill accepts #RRGGBB or {kind:'linear',x0,y0,x1,y1,stops:[{offset:0,color:'#ffdd88'},{offset:1,color:'#d85a04'}]}, or {kind:'radial',cx,cy,radius,stops}. Stop opacity is 0–1. Stroke geometry supports style.brush={kind:'soft',softness:0.8} or {kind:'textured',grain:0.5,seed:42}; marker is the default. Drawing clip={segments:[M/L/Q/C/Z...],transform:[1,0,0,1,0,0]} keeps paint inside a local path and moves with the drawing. World coordinates, no scripts or stamps. Identical commandId retries return the original receipt without drawing twice. Returns after durable acceptance and attempted local presentation.",
         input_schema: webmcp::schema("apply"),
         annotations: annotations(false),
         enabled: ready,

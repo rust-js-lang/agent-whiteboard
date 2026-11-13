@@ -2,6 +2,15 @@
 
 /** Shared document authority. Browser and server execute these same transitions. */
 import {
+  Brush,
+  Paint,
+  clipDeserialize_deserialize,
+  clipSerialize_serialize,
+  styleDefault_default,
+  styleDeserialize_deserialize,
+  styleSerialize_serialize,
+} from "./painting.js";
+import {
   $add,
   $byteLen,
   $cmp,
@@ -23,6 +32,7 @@ import {
   $utf8Bytes,
   $windows,
 } from "@rust-js/std";
+export { inkLayers } from "./painting.js";
 
 const MAX_ELEMENTS = 10000;
 const MAX_EVENTS = 10000;
@@ -52,17 +62,11 @@ export function pointDeserialize_deserialize(json) {
     { deny: true },
   );
 }
-function one() {
+export function one() {
   return 1;
 }
-function identity() {
+export function identity() {
   return [1, 0, 0, 1, 0, 0];
-}
-function defaultWidth() {
-  return 8;
-}
-function defaultColor() {
-  return "#243b35";
 }
 
 export function segmentSerialize_serialize(segment, json) {
@@ -260,48 +264,16 @@ export function geometryDeserialize_deserialize(json) {
     },
   );
 }
-export function styleSerialize_serialize(style, json) {
-  json.beginObject();
-  json.key("stroke");
-  json.string(style.stroke);
-  json.key("fill");
-  if (style.fill == null) {
-    json.null();
-  } else {
-    json.string(style.fill);
-  }
-  json.key("width");
-  json.number(style.width);
-  json.key("opacity");
-  json.number(style.opacity);
-  json.endObject();
-}
-
-export function styleDeserialize_deserialize(json) {
-  return json.struct(
-    "struct Style",
-    [
-      ["stroke", $json.string, (defaults) => defaults.stroke],
-      ["fill", $json.option($json.string), (defaults) => defaults.fill],
-      ["width", $json.f64, (defaults) => defaults.width],
-      ["opacity", $json.f64, (defaults) => defaults.opacity],
-    ],
-    ([stroke, fill, width, opacity], defaults) => ({ stroke, fill, width, opacity }),
-    { deny: true, container: () => styleDefault_default() },
-  );
-}
-export const styleDefault = { default: styleDefault_default };
-function styleDefault_default() {
-  return {
-    stroke: defaultColor(),
-    width: defaultWidth(),
-    opacity: 1,
-  };
-}
 export function drawingSerialize_serialize(drawing, json) {
   json.beginObject();
   json.key("geometry");
   geometrySerialize_serialize(drawing.geometry, json);
+  json.key("clip");
+  if (drawing.clip == null) {
+    json.null();
+  } else {
+    clipSerialize_serialize(drawing.clip, json);
+  }
   json.key("style");
   styleSerialize_serialize(drawing.style, json);
   json.key("transform");
@@ -319,10 +291,11 @@ export function drawingDeserialize_deserialize(json) {
     "struct Drawing",
     [
       ["geometry", geometryDeserialize_deserialize],
+      ["clip", $json.option(clipDeserialize_deserialize), () => undefined],
       ["style", styleDeserialize_deserialize, () => styleDefault_default()],
       ["transform", $json.array(6, $json.f64), () => identity()],
     ],
-    ([geometry, style, transform]) => ({ geometry, style, transform }),
+    ([geometry, clip, style, transform]) => ({ geometry, clip, style, transform }),
     { deny: true },
   );
 }
@@ -893,10 +866,10 @@ function validId(id) {
     })
   );
 }
-function coordinate(value) {
+export function coordinate(value) {
   return Number.isFinite(value) && Math.abs(value) <= 1000000;
 }
-function color(value) {
+export function color(value) {
   return (
     $byteLen(value) === 7 &&
     value.startsWith("#") &&
@@ -922,7 +895,7 @@ function pointsValid(points) {
 function matrixValid(m) {
   return m.every(coordinate) && Math.abs(m[0] * m[3] - m[1] * m[2]) > 0.000001;
 }
-function inverse(m) {
+export function inverse(m) {
   const determinant = m[0] * m[3] - m[1] * m[2];
   return [
     m[3] / determinant,
@@ -937,9 +910,30 @@ function inverse(m) {
 export const Drawing = {
   validate(drawing) {
     const style = drawing.style;
+    const result = Paint.validate(style.stroke);
+    if (result.TAG === "Err") {
+      return result;
+    }
+    if (style.fill != null) {
+      const result = Paint.validate(style.fill);
+      if (result.TAG === "Err") {
+        return result;
+      }
+    }
+    const result$1 = Brush.validate(style.brush, drawing.geometry, style.width);
+    if (result$1.TAG === "Err") {
+      return result$1;
+    }
+    if (drawing.clip != null) {
+      if (!matrixValid(drawing.clip.transform)) {
+        return { TAG: "Err", _0: "Clip transform must be finite and invertible." };
+      }
+      const result = validateSegments(drawing.clip.segments);
+      if (result.TAG === "Err") {
+        return result;
+      }
+    }
     if (
-      !color(style.stroke) ||
-      (style.fill != null && !color(style.fill)) ||
       !Number.isFinite(style.width) ||
       style.width <= 0 ||
       style.width > 500 ||
@@ -957,45 +951,22 @@ export const Drawing = {
       if (pointsValid(drawing.geometry.points)) {
         return { TAG: "Ok" };
       }
-    } else if (drawing.geometry.TAG === "Path") {
-      if (
-        drawing.geometry.segments.length !== 0 &&
-        drawing.geometry.segments.length <= MAX_POINTS
-      ) {
-        const first = drawing.geometry.segments[0];
-        if (first != null && first.TAG === "M") {
-          for (const segment of drawing.geometry.segments) {
-            let values;
-            if (segment.TAG === "M" || segment.TAG === "L") {
-              values = [segment.x, segment.y];
-            } else if (segment.TAG === "Q") {
-              values = [segment.cx, segment.cy, segment.x, segment.y];
-            } else if (segment.TAG === "C") {
-              values = [segment.cx1, segment.cy1, segment.cx2, segment.cy2, segment.x, segment.y];
-            } else {
-              values = [];
-            }
-            if (!values.every(coordinate)) {
-              return {
-                TAG: "Err",
-                _0: "Path coordinates must be finite and within the supported board range.",
-              };
-            }
-          }
-          return { TAG: "Ok" };
-        }
+    } else {
+      if (drawing.geometry.TAG === "Path") {
+        return validateSegments(drawing.geometry.segments);
       }
-    } else if (
-      drawing.geometry.TAG === "Text" &&
-      coordinate(drawing.geometry.x) &&
-      coordinate(drawing.geometry.y) &&
-      drawing.geometry.text !== "" &&
-      $byteLen(drawing.geometry.text) <= 8000 &&
-      Number.isFinite(drawing.geometry.size) &&
-      drawing.geometry.size >= 4 &&
-      drawing.geometry.size <= 500
-    ) {
-      return { TAG: "Ok" };
+      if (
+        drawing.geometry.TAG === "Text" &&
+        coordinate(drawing.geometry.x) &&
+        coordinate(drawing.geometry.y) &&
+        drawing.geometry.text !== "" &&
+        $byteLen(drawing.geometry.text) <= 8000 &&
+        Number.isFinite(drawing.geometry.size) &&
+        drawing.geometry.size >= 4 &&
+        drawing.geometry.size <= 500
+      ) {
+        return { TAG: "Ok" };
+      }
     }
     return {
       TAG: "Err",
@@ -1003,15 +974,47 @@ export const Drawing = {
     };
   },
   pointCount(drawing) {
-    if (drawing.geometry.TAG === "Stroke") {
-      return drawing.geometry.points.length;
-    }
-    if (drawing.geometry.TAG === "Path") {
-      return drawing.geometry.segments.length;
-    }
-    return 0;
+    return (
+      ((drawing.clip != null ? drawing.clip.segments.length : 0) +
+        (drawing.geometry.TAG === "Stroke"
+          ? drawing.geometry.points.length
+          : drawing.geometry.TAG === "Path"
+            ? drawing.geometry.segments.length
+            : 0)) >>>
+      0
+    );
   },
 };
+export function validateSegments(segments) {
+  if (
+    segments.length === 0 ||
+    segments.length > MAX_POINTS ||
+    segments[0] == null ||
+    segments[0].TAG !== "M"
+  ) {
+    return { TAG: "Err", _0: "A path needs 1–20000 segments beginning with M." };
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    let values;
+    if (segment.TAG === "M" || segment.TAG === "L") {
+      values = [segment.x, segment.y];
+    } else if (segment.TAG === "Q") {
+      values = [segment.cx, segment.cy, segment.x, segment.y];
+    } else if (segment.TAG === "C") {
+      values = [segment.cx1, segment.cy1, segment.cx2, segment.cy2, segment.x, segment.y];
+    } else {
+      values = [];
+    }
+    if (!values.every(coordinate)) {
+      return {
+        TAG: "Err",
+        _0: "Path coordinates must be finite and within the supported board range.",
+      };
+    }
+  }
+  return { TAG: "Ok" };
+}
 function ordered(elements) {
   elements.sort((a, b) => $cmp(a.order, b.order) || $cmp(a.id, b.id));
 }
@@ -1042,7 +1045,14 @@ function target(elements, id, version) {
     TAG: "Ok",
     _0: {
       ...element,
-      drawing: { ...element.drawing, transform: element.drawing.transform.slice() },
+      drawing: {
+        ...element.drawing,
+        clip:
+          element.drawing.clip == null
+            ? element.drawing.clip
+            : { ...element.drawing.clip, transform: element.drawing.clip.transform.slice() },
+        transform: element.drawing.transform.slice(),
+      },
       masks: element.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
     },
   };
@@ -1069,6 +1079,13 @@ function inverseChanges(elements, changes, sequence) {
             ...change.before,
             drawing: {
               ...change.before.drawing,
+              clip:
+                change.before.drawing.clip == null
+                  ? change.before.drawing.clip
+                  : {
+                      ...change.before.drawing.clip,
+                      transform: change.before.drawing.clip.transform.slice(),
+                    },
               transform: change.before.drawing.transform.slice(),
             },
             masks: change.before.masks.map((item) => ({
@@ -1090,6 +1107,13 @@ function inverseChanges(elements, changes, sequence) {
               ...change.after,
               drawing: {
                 ...change.after.drawing,
+                clip:
+                  change.after.drawing.clip == null
+                    ? change.after.drawing.clip
+                    : {
+                        ...change.after.drawing.clip,
+                        transform: change.after.drawing.clip.transform.slice(),
+                      },
                 transform: change.after.drawing.transform.slice(),
               },
               masks: change.after.masks.map((item) => ({
@@ -1102,7 +1126,17 @@ function inverseChanges(elements, changes, sequence) {
           ? restored
           : {
               ...restored,
-              drawing: { ...restored.drawing, transform: restored.drawing.transform.slice() },
+              drawing: {
+                ...restored.drawing,
+                clip:
+                  restored.drawing.clip == null
+                    ? restored.drawing.clip
+                    : {
+                        ...restored.drawing.clip,
+                        transform: restored.drawing.clip.transform.slice(),
+                      },
+                transform: restored.drawing.transform.slice(),
+              },
               masks: restored.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
             },
     });
@@ -1123,6 +1157,13 @@ function rebaseExpected(expected, source, applied) {
                 ...actual.after,
                 drawing: {
                   ...actual.after.drawing,
+                  clip:
+                    actual.after.drawing.clip == null
+                      ? actual.after.drawing.clip
+                      : {
+                          ...actual.after.drawing.clip,
+                          transform: actual.after.drawing.clip.transform.slice(),
+                        },
                   transform: actual.after.drawing.transform.slice(),
                 },
                 masks: actual.after.masks.map((item) => ({
@@ -1144,7 +1185,14 @@ export const Journal = {
       height: 2304,
       elements: journal.elements.map((item) => ({
         ...item,
-        drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+        drawing: {
+          ...item.drawing,
+          clip:
+            item.drawing.clip == null
+              ? item.drawing.clip
+              : { ...item.drawing.clip, transform: item.drawing.clip.transform.slice() },
+          transform: item.drawing.transform.slice(),
+        },
         masks: item.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
       })),
       canUndo: journal.history.some((h) => h.actor === actor && h.active),
@@ -1213,6 +1261,13 @@ export const Journal = {
                 ...change.after,
                 drawing: {
                   ...change.after.drawing,
+                  clip:
+                    change.after.drawing.clip == null
+                      ? change.after.drawing.clip
+                      : {
+                          ...change.after.drawing.clip,
+                          transform: change.after.drawing.clip.transform.slice(),
+                        },
                   transform: change.after.drawing.transform.slice(),
                 },
                 masks: change.after.masks.map((item) => ({
@@ -1255,7 +1310,14 @@ export const Journal = {
             ...journal,
             elements: journal.elements.map((item) => ({
               ...item,
-              drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+              drawing: {
+                ...item.drawing,
+                clip:
+                  item.drawing.clip == null
+                    ? item.drawing.clip
+                    : { ...item.drawing.clip, transform: item.drawing.clip.transform.slice() },
+                transform: item.drawing.transform.slice(),
+              },
               masks: item.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
             })),
             events: journal.events.map((item) => ({
@@ -1269,6 +1331,13 @@ export const Journal = {
                         ...item.before,
                         drawing: {
                           ...item.before.drawing,
+                          clip:
+                            item.before.drawing.clip == null
+                              ? item.before.drawing.clip
+                              : {
+                                  ...item.before.drawing.clip,
+                                  transform: item.before.drawing.clip.transform.slice(),
+                                },
                           transform: item.before.drawing.transform.slice(),
                         },
                         masks: item.before.masks.map((item) => ({
@@ -1283,6 +1352,13 @@ export const Journal = {
                         ...item.after,
                         drawing: {
                           ...item.after.drawing,
+                          clip:
+                            item.after.drawing.clip == null
+                              ? item.after.drawing.clip
+                              : {
+                                  ...item.after.drawing.clip,
+                                  transform: item.after.drawing.clip.transform.slice(),
+                                },
                           transform: item.after.drawing.transform.slice(),
                         },
                         masks: item.after.masks.map((item) => ({
@@ -1303,6 +1379,13 @@ export const Journal = {
                         ...item.before,
                         drawing: {
                           ...item.before.drawing,
+                          clip:
+                            item.before.drawing.clip == null
+                              ? item.before.drawing.clip
+                              : {
+                                  ...item.before.drawing.clip,
+                                  transform: item.before.drawing.clip.transform.slice(),
+                                },
                           transform: item.before.drawing.transform.slice(),
                         },
                         masks: item.before.masks.map((item) => ({
@@ -1317,6 +1400,13 @@ export const Journal = {
                         ...item.after,
                         drawing: {
                           ...item.after.drawing,
+                          clip:
+                            item.after.drawing.clip == null
+                              ? item.after.drawing.clip
+                              : {
+                                  ...item.after.drawing.clip,
+                                  transform: item.after.drawing.clip.transform.slice(),
+                                },
                           transform: item.after.drawing.transform.slice(),
                         },
                         masks: item.after.masks.map((item) => ({
@@ -1334,6 +1424,13 @@ export const Journal = {
                         ...item.before,
                         drawing: {
                           ...item.before.drawing,
+                          clip:
+                            item.before.drawing.clip == null
+                              ? item.before.drawing.clip
+                              : {
+                                  ...item.before.drawing.clip,
+                                  transform: item.before.drawing.clip.transform.slice(),
+                                },
                           transform: item.before.drawing.transform.slice(),
                         },
                         masks: item.before.masks.map((item) => ({
@@ -1348,6 +1445,13 @@ export const Journal = {
                         ...item.after,
                         drawing: {
                           ...item.after.drawing,
+                          clip:
+                            item.after.drawing.clip == null
+                              ? item.after.drawing.clip
+                              : {
+                                  ...item.after.drawing.clip,
+                                  transform: item.after.drawing.clip.transform.slice(),
+                                },
                           transform: item.after.drawing.transform.slice(),
                         },
                         masks: item.after.masks.map((item) => ({
@@ -1365,12 +1469,32 @@ export const Journal = {
                   item.TAG === "Create"
                     ? {
                         ...item,
-                        drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+                        drawing: {
+                          ...item.drawing,
+                          clip:
+                            item.drawing.clip == null
+                              ? item.drawing.clip
+                              : {
+                                  ...item.drawing.clip,
+                                  transform: item.drawing.clip.transform.slice(),
+                                },
+                          transform: item.drawing.transform.slice(),
+                        },
                       }
                     : item.TAG === "Replace"
                       ? {
                           ...item,
-                          drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+                          drawing: {
+                            ...item.drawing,
+                            clip:
+                              item.drawing.clip == null
+                                ? item.drawing.clip
+                                : {
+                                    ...item.drawing.clip,
+                                    transform: item.drawing.clip.transform.slice(),
+                                  },
+                            transform: item.drawing.transform.slice(),
+                          },
                         }
                       : item,
                 ),
@@ -1390,7 +1514,14 @@ export const Journal = {
       ...journal,
       elements: journal.elements.map((item) => ({
         ...item,
-        drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+        drawing: {
+          ...item.drawing,
+          clip:
+            item.drawing.clip == null
+              ? item.drawing.clip
+              : { ...item.drawing.clip, transform: item.drawing.clip.transform.slice() },
+          transform: item.drawing.transform.slice(),
+        },
         masks: item.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
       })),
       events: journal.events.map((item) => ({
@@ -1404,6 +1535,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1418,6 +1556,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1438,6 +1583,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1452,6 +1604,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1469,6 +1628,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1483,6 +1649,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1498,11 +1671,31 @@ export const Journal = {
           ...item.command,
           operations: item.command.operations.map((item) =>
             item.TAG === "Create"
-              ? { ...item, drawing: { ...item.drawing, transform: item.drawing.transform.slice() } }
+              ? {
+                  ...item,
+                  drawing: {
+                    ...item.drawing,
+                    clip:
+                      item.drawing.clip == null
+                        ? item.drawing.clip
+                        : { ...item.drawing.clip, transform: item.drawing.clip.transform.slice() },
+                    transform: item.drawing.transform.slice(),
+                  },
+                }
               : item.TAG === "Replace"
                 ? {
                     ...item,
-                    drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+                    drawing: {
+                      ...item.drawing,
+                      clip:
+                        item.drawing.clip == null
+                          ? item.drawing.clip
+                          : {
+                              ...item.drawing.clip,
+                              transform: item.drawing.clip.transform.slice(),
+                            },
+                      transform: item.drawing.transform.slice(),
+                    },
                   }
                 : item,
           ),
@@ -1550,6 +1743,13 @@ export const Journal = {
                 ...item.before,
                 drawing: {
                   ...item.before.drawing,
+                  clip:
+                    item.before.drawing.clip == null
+                      ? item.before.drawing.clip
+                      : {
+                          ...item.before.drawing.clip,
+                          transform: item.before.drawing.clip.transform.slice(),
+                        },
                   transform: item.before.drawing.transform.slice(),
                 },
                 masks: item.before.masks.map((item) => ({
@@ -1562,7 +1762,17 @@ export const Journal = {
             ? item.after
             : {
                 ...item.after,
-                drawing: { ...item.after.drawing, transform: item.after.drawing.transform.slice() },
+                drawing: {
+                  ...item.after.drawing,
+                  clip:
+                    item.after.drawing.clip == null
+                      ? item.after.drawing.clip
+                      : {
+                          ...item.after.drawing.clip,
+                          transform: item.after.drawing.clip.transform.slice(),
+                        },
+                  transform: item.after.drawing.transform.slice(),
+                },
                 masks: item.after.masks.map((item) => ({
                   ...item,
                   transform: item.transform.slice(),
@@ -1590,6 +1800,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1604,6 +1821,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1626,6 +1850,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1640,6 +1871,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1692,14 +1930,34 @@ export const Journal = {
             version: sequence,
             order: (((sequence * 256) >>> 0) + index) >>> 0,
             author: actor,
-            drawing: { ...operation.drawing, transform: operation.drawing.transform.slice() },
+            drawing: {
+              ...operation.drawing,
+              clip:
+                operation.drawing.clip == null
+                  ? operation.drawing.clip
+                  : {
+                      ...operation.drawing.clip,
+                      transform: operation.drawing.clip.transform.slice(),
+                    },
+              transform: operation.drawing.transform.slice(),
+            },
             masks: [],
           };
           changes.push({
             id: operation.id,
             after: {
               ...element,
-              drawing: { ...element.drawing, transform: element.drawing.transform.slice() },
+              drawing: {
+                ...element.drawing,
+                clip:
+                  element.drawing.clip == null
+                    ? element.drawing.clip
+                    : {
+                        ...element.drawing.clip,
+                        transform: element.drawing.clip.transform.slice(),
+                      },
+                transform: element.drawing.transform.slice(),
+              },
               masks: element.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
             },
           });
@@ -1717,17 +1975,41 @@ export const Journal = {
           const before = result$1._0;
           const after = {
             ...before,
-            drawing: { ...before.drawing, transform: before.drawing.transform.slice() },
+            drawing: {
+              ...before.drawing,
+              clip:
+                before.drawing.clip == null
+                  ? before.drawing.clip
+                  : { ...before.drawing.clip, transform: before.drawing.clip.transform.slice() },
+              transform: before.drawing.transform.slice(),
+            },
             masks: before.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
           };
-          after.drawing = { ...operation.drawing, transform: operation.drawing.transform.slice() };
+          after.drawing = {
+            ...operation.drawing,
+            clip:
+              operation.drawing.clip == null
+                ? operation.drawing.clip
+                : {
+                    ...operation.drawing.clip,
+                    transform: operation.drawing.clip.transform.slice(),
+                  },
+            transform: operation.drawing.transform.slice(),
+          };
           after.version = sequence;
           changes.push({
             id: operation.id,
             before,
             after: {
               ...after,
-              drawing: { ...after.drawing, transform: after.drawing.transform.slice() },
+              drawing: {
+                ...after.drawing,
+                clip:
+                  after.drawing.clip == null
+                    ? after.drawing.clip
+                    : { ...after.drawing.clip, transform: after.drawing.clip.transform.slice() },
+                transform: after.drawing.transform.slice(),
+              },
               masks: after.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
             },
           });
@@ -1763,7 +2045,14 @@ export const Journal = {
             const before = result._0;
             const after = {
               ...before,
-              drawing: { ...before.drawing, transform: before.drawing.transform.slice() },
+              drawing: {
+                ...before.drawing,
+                clip:
+                  before.drawing.clip == null
+                    ? before.drawing.clip
+                    : { ...before.drawing.clip, transform: before.drawing.clip.transform.slice() },
+                transform: before.drawing.transform.slice(),
+              },
               masks: before.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
             };
             after.masks.push({
@@ -1777,7 +2066,14 @@ export const Journal = {
               before,
               after: {
                 ...after,
-                drawing: { ...after.drawing, transform: after.drawing.transform.slice() },
+                drawing: {
+                  ...after.drawing,
+                  clip:
+                    after.drawing.clip == null
+                      ? after.drawing.clip
+                      : { ...after.drawing.clip, transform: after.drawing.clip.transform.slice() },
+                  transform: after.drawing.transform.slice(),
+                },
                 masks: after.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
               },
             });
@@ -1793,7 +2089,14 @@ export const Journal = {
           }
           for (const element of next.elements.map((item) => ({
             ...item,
-            drawing: { ...item.drawing, transform: item.drawing.transform.slice() },
+            drawing: {
+              ...item.drawing,
+              clip:
+                item.drawing.clip == null
+                  ? item.drawing.clip
+                  : { ...item.drawing.clip, transform: item.drawing.clip.transform.slice() },
+              transform: item.drawing.transform.slice(),
+            },
             masks: item.masks.map((item) => ({ ...item, transform: item.transform.slice() })),
           }))) {
             changes.push({
@@ -1829,6 +2132,13 @@ export const Journal = {
                   ...item.before,
                   drawing: {
                     ...item.before.drawing,
+                    clip:
+                      item.before.drawing.clip == null
+                        ? item.before.drawing.clip
+                        : {
+                            ...item.before.drawing.clip,
+                            transform: item.before.drawing.clip.transform.slice(),
+                          },
                     transform: item.before.drawing.transform.slice(),
                   },
                   masks: item.before.masks.map((item) => ({
@@ -1843,6 +2153,13 @@ export const Journal = {
                   ...item.after,
                   drawing: {
                     ...item.after.drawing,
+                    clip:
+                      item.after.drawing.clip == null
+                        ? item.after.drawing.clip
+                        : {
+                            ...item.after.drawing.clip,
+                            transform: item.after.drawing.clip.transform.slice(),
+                          },
                     transform: item.after.drawing.transform.slice(),
                   },
                   masks: item.after.masks.map((item) => ({
@@ -1868,6 +2185,13 @@ export const Journal = {
                 ...item.before,
                 drawing: {
                   ...item.before.drawing,
+                  clip:
+                    item.before.drawing.clip == null
+                      ? item.before.drawing.clip
+                      : {
+                          ...item.before.drawing.clip,
+                          transform: item.before.drawing.clip.transform.slice(),
+                        },
                   transform: item.before.drawing.transform.slice(),
                 },
                 masks: item.before.masks.map((item) => ({
@@ -1880,7 +2204,17 @@ export const Journal = {
             ? item.after
             : {
                 ...item.after,
-                drawing: { ...item.after.drawing, transform: item.after.drawing.transform.slice() },
+                drawing: {
+                  ...item.after.drawing,
+                  clip:
+                    item.after.drawing.clip == null
+                      ? item.after.drawing.clip
+                      : {
+                          ...item.after.drawing.clip,
+                          transform: item.after.drawing.clip.transform.slice(),
+                        },
+                  transform: item.after.drawing.transform.slice(),
+                },
                 masks: item.after.masks.map((item) => ({
                   ...item,
                   transform: item.transform.slice(),
@@ -1992,6 +2326,13 @@ export function replaySnapshot(journal, sequence) {
               ...change.after,
               drawing: {
                 ...change.after.drawing,
+                clip:
+                  change.after.drawing.clip == null
+                    ? change.after.drawing.clip
+                    : {
+                        ...change.after.drawing.clip,
+                        transform: change.after.drawing.clip.transform.slice(),
+                      },
                 transform: change.after.drawing.transform.slice(),
               },
               masks: change.after.masks.map((item) => ({
@@ -2028,7 +2369,7 @@ export function replayJson(record, sequence, actor) {
 }
 
 /** A single nonzero-filled outline: overlapping subpaths do not darken marker ink. */
-function inkPath(points, width) {
+export function inkPath(points, width) {
   let path = "";
   for (let i = 0; i < points.length; i++) {
     const point = points[i];
@@ -2060,27 +2401,30 @@ export function pathData(drawing) {
   if (drawing.geometry.TAG === "Stroke") {
     path = inkPath(drawing.geometry.points, drawing.style.width);
   } else if (drawing.geometry.TAG === "Path") {
-    path = drawing.geometry.segments
-      .map((s) => {
-        if (s.TAG === "M") {
-          return `M ${$displayF64(s.x)} ${$displayF64(s.y)}`;
-        }
-        if (s.TAG === "L") {
-          return `L ${$displayF64(s.x)} ${$displayF64(s.y)}`;
-        }
-        if (s.TAG === "Q") {
-          return `Q ${$displayF64(s.cx)} ${$displayF64(s.cy)} ${$displayF64(s.x)} ${$displayF64(s.y)}`;
-        }
-        if (s.TAG === "C") {
-          return `C ${$displayF64(s.cx1)} ${$displayF64(s.cy1)} ${$displayF64(s.cx2)} ${$displayF64(s.cy2)} ${$displayF64(s.x)} ${$displayF64(s.y)}`;
-        }
-        return "Z";
-      })
-      .join(" ");
+    path = segmentData(drawing.geometry.segments);
   } else {
     path = "";
   }
   return { TAG: "Ok", _0: path };
+}
+export function segmentData(segments) {
+  return segments
+    .map((s) => {
+      if (s.TAG === "M") {
+        return `M ${$displayF64(s.x)} ${$displayF64(s.y)}`;
+      }
+      if (s.TAG === "L") {
+        return `L ${$displayF64(s.x)} ${$displayF64(s.y)}`;
+      }
+      if (s.TAG === "Q") {
+        return `Q ${$displayF64(s.cx)} ${$displayF64(s.cy)} ${$displayF64(s.x)} ${$displayF64(s.y)}`;
+      }
+      if (s.TAG === "C") {
+        return `C ${$displayF64(s.cx1)} ${$displayF64(s.cy1)} ${$displayF64(s.cx2)} ${$displayF64(s.cy2)} ${$displayF64(s.x)} ${$displayF64(s.y)}`;
+      }
+      return "Z";
+    })
+    .join(" ");
 }
 export function maskData(mask) {
   if (

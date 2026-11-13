@@ -21,6 +21,7 @@
   "include": [
     "tests",
     "scripts",
-    "playwright.config.ts"
+    "playwright.config.ts",
+    "web/vite.config.ts"
   ]
 }

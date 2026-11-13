@@ -3,4 +3,4 @@
 import type { Session } from "./session.js";
 import type { ToolState } from "./webmcp.js";
 
-export function useTools(session: Session): ToolState[];
+export function useTools(session: Session, ready: boolean): ToolState[];

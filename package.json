@@ -5,14 +5,14 @@
   "type": "module",
   "packageManager": "bun@1.4.4",
   "scripts": {
-    "setup": "bun install --frozen-lockfile && bun install --cwd rust-js --frozen-lockfile --ignore-scripts && bun run patch:compiler",
+    "setup": "bun run patch:compiler && bun install --frozen-lockfile --force && bun install --cwd rust-js --frozen-lockfile --ignore-scripts",
     "patch:compiler": "bun scripts/patch-rust-js.ts",
     "compile": "bun run patch:compiler && bun rust-js/tooling/cli.js build --package agent-whiteboard-web",
     "build": "bun run compile && bun run bundle",
     "bundle": "bunx --bun vite build web && bun scripts/offline.ts",
     "dev": "bun run compile && bunx --bun vite web",
     "preview": "bunx --bun vite preview web",
-    "check": "bun scripts/check-source.ts && bunx --bun tsc --noEmit && cargo fmt --package whiteboard-core --package whiteboard-server --package agent-whiteboard-web -- --check && cargo clippy --locked --package whiteboard-core --package whiteboard-server --all-targets -- -D warnings && bun rust-js/tooling/cli.js build --package agent-whiteboard-web --check && bun rust-js/tooling/cli.js clippy --package agent-whiteboard-web -- -D warnings",
+    "check": "bun scripts/check-source.ts && bun scripts/check-react-compiler.ts && bunx --bun tsc --noEmit && cargo fmt --package whiteboard-core --package whiteboard-server --package agent-whiteboard-web -- --check && cargo clippy --locked --package whiteboard-core --package whiteboard-server --all-targets -- -D warnings && bun rust-js/tooling/cli.js build --package agent-whiteboard-web --check && bun rust-js/tooling/cli.js clippy --package agent-whiteboard-web -- -D warnings",
     "test:core": "cargo test --locked --package whiteboard-core --package whiteboard-server && bun rust-js/tooling/cli.js test --package whiteboard-core",
     "test": "bunx --bun playwright test",
     "server": "cargo run --locked --package whiteboard-server"
@@ -31,6 +31,8 @@
     "@types/pngjs": "6.0.5",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "6.3.0",
+    "oxc-transform-react": "0.158.0",
     "pngjs": "7.0.0",
     "typescript": "latest",
     "vite": "8.3.8"

@@ -8,8 +8,8 @@ use react::{Dispatch, SetStateAction};
 use serde::Serialize;
 use webapi::{HTMLCanvasElement, PointerEvent, document, window};
 use whiteboard_core::{
-    Drawing, Element, Geometry, Journal, Operation, Point, Segment, Snapshot, Style, Target,
-    replay_snapshot,
+    Brush as InkBrush, Clip, ColorStop, Drawing, Element, Geometry, Gradient, Journal, Operation,
+    Paint, Point, Segment, Snapshot, Style, Target, replay_snapshot,
 };
 
 use crate::render::{self, Mapping, Renderer, Viewport};
@@ -51,16 +51,27 @@ impl Tool {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+pub enum PaintMode {
+    Solid,
+    Linear,
+    Radial,
+}
 #[derive(Clone)]
-struct Brush {
-    tool: Tool,
-    color: String,
-    width: f64,
-    filled: bool,
+pub struct BrushSettings {
+    pub tool: Tool,
+    pub color: String,
+    pub secondary: String,
+    pub width: f64,
+    pub filled: bool,
+    pub opacity: f64,
+    pub ink: InkBrush,
+    pub paint: PaintMode,
+    pub clip: Option<Clip>,
 }
 struct Pointer {
     id: i32,
-    brush: Brush,
+    brush: BrushSettings,
     start: Point,
     screen: (f64, f64),
     view: Viewport,
@@ -85,7 +96,7 @@ pub struct Surface {
     renderer: Renderer,
     live: RefCell<Snapshot>,
     view: Cell<Viewport>,
-    brush: RefCell<Brush>,
+    brush: RefCell<BrushSettings>,
     pointer: RefCell<Option<Pointer>>,
     draft: RefCell<Option<Element>>,
     selected: RefCell<Option<String>>,
@@ -111,11 +122,16 @@ impl Surface {
             renderer: Renderer::default(),
             live: RefCell::new(Journal::default().snapshot("initial")),
             view: Cell::new(view),
-            brush: RefCell::new(Brush {
+            brush: RefCell::new(BrushSettings {
                 tool: Tool::Pen,
                 color: "#243b35".into(),
                 width: 12.0,
                 filled: false,
+                secondary: "#ffffff".into(),
+                opacity: 1.0,
+                ink: InkBrush::Marker,
+                paint: PaintMode::Solid,
+                clip: None,
             }),
             pointer: RefCell::new(None),
             draft: RefCell::new(None),
@@ -130,19 +146,48 @@ impl Surface {
         surface.resize();
         Ok(surface)
     }
-    pub fn configure(&self, tool: Tool, color: &str, width: f64, filled: bool) {
-        *self.brush.borrow_mut() = Brush {
-            tool,
-            color: color.into(),
-            width,
-            filled,
-        };
+    pub fn configure(&self, settings: BrushSettings) {
+        *self.brush.borrow_mut() = settings;
+    }
+    pub fn selected_clip(&self) -> Result<Clip, String> {
+        let element = self
+            .selected()
+            .ok_or("Select a path shape before clipping the brush.")?;
+        match element.drawing.geometry {
+            Geometry::Path { segments } => Ok(Clip {
+                segments,
+                transform: element.drawing.transform,
+            }),
+            _ => Err(
+                "Clipping needs a path shape, such as a rectangle, ellipse or Bezier outline."
+                    .into(),
+            ),
+        }
+    }
+    pub fn text_drawing(&self, point: Point, text: String, size: f64) -> Drawing {
+        self.element(
+            &self.brush.borrow(),
+            Geometry::Text {
+                x: point.x,
+                y: point.y,
+                text,
+                size,
+            },
+        )
+        .drawing
     }
     pub fn update(&self, snapshot: Snapshot) {
         let changed = snapshot.sequence != self.live.borrow().sequence;
         if changed {
             self.stop_replay();
-            self.selected.borrow_mut().take();
+            if self
+                .selected
+                .borrow()
+                .as_ref()
+                .is_some_and(|id| !snapshot.elements.iter().any(|element| &element.id == id))
+            {
+                self.selected.borrow_mut().take();
+            }
         }
         *self.live.borrow_mut() = snapshot;
         self.paint();
@@ -267,24 +312,65 @@ impl Surface {
         self.selected.borrow_mut().take();
         self.paint();
     }
-    fn element(&self, brush: &Brush, geometry: Geometry) -> Element {
-        Element {
+    fn element(&self, brush: &BrushSettings, geometry: Geometry) -> Element {
+        let ink = if matches!(geometry, Geometry::Stroke { .. }) {
+            brush.ink.clone()
+        } else {
+            InkBrush::Marker
+        };
+        let mut element = Element {
             id: "draft".into(),
             version: 0,
             order: u32::MAX,
             author: "draft".into(),
             drawing: Drawing {
+                clip: brush.clip.clone(),
                 geometry,
                 style: Style {
-                    stroke: brush.color.clone(),
-                    fill: brush.filled.then(|| brush.color.clone()),
+                    stroke: brush.color.clone().into(),
+                    fill: brush.filled.then(|| brush.color.clone().into()),
                     width: brush.width,
-                    opacity: 1.0,
+                    opacity: brush.opacity,
+                    brush: ink,
                 },
                 transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             },
             masks: Vec::new(),
+        };
+        if brush.paint != PaintMode::Solid {
+            let bounds = render::bounds(&element);
+            let stops = vec![
+                ColorStop {
+                    offset: 0.0,
+                    color: brush.color.clone(),
+                    opacity: 1.0,
+                },
+                ColorStop {
+                    offset: 1.0,
+                    color: brush.secondary.clone(),
+                    opacity: 1.0,
+                },
+            ];
+            let gradient = match brush.paint {
+                PaintMode::Linear => Gradient::Linear {
+                    x0: bounds.x,
+                    y0: bounds.y,
+                    x1: bounds.x + bounds.width,
+                    y1: bounds.y + bounds.height,
+                    stops,
+                },
+                _ => Gradient::Radial {
+                    cx: bounds.x + bounds.width * 0.35,
+                    cy: bounds.y + bounds.height * 0.3,
+                    radius: bounds.width.max(bounds.height) * 0.7,
+                    stops,
+                },
+            };
+            let paint = Paint::Gradient(gradient);
+            element.drawing.style.stroke = paint.clone();
+            element.drawing.style.fill = brush.filled.then_some(paint);
         }
+        element
     }
     pub fn down(&self, id: i32, x: f64, y: f64, pressure: f64) -> Option<Point> {
         if self.replay.borrow().is_some() {
@@ -406,15 +492,19 @@ impl Surface {
         let point = self.world(x, y);
         match pointer.brush.tool {
             Tool::Hand | Tool::Text => None,
-            Tool::Select => pointer.element.map(|element| {
+            Tool::Select => pointer.element.and_then(|element| {
+                if point.x == pointer.start.x && point.y == pointer.start.y {
+                    self.clear_draft();
+                    return None;
+                }
                 let mut drawing = element.drawing;
                 drawing.transform[4] += point.x - pointer.start.x;
                 drawing.transform[5] += point.y - pointer.start.y;
-                vec![Operation::Replace {
+                Some(vec![Operation::Replace {
                     id: element.id,
                     expected_version: element.version,
                     drawing,
-                }]
+                }])
             }),
             Tool::Eraser => {
                 let targets = self

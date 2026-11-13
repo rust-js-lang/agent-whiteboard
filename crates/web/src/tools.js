@@ -23,6 +23,7 @@ import { Surface, playbackResultSerialize_serialize } from "./surface.js";
 import {
   $debugJsonError,
   $displayJsonError,
+  $handle,
   $json,
   $jsonIndexMut,
   $jsonInt,
@@ -112,8 +113,7 @@ function annotations(readOnly) {
 function check(options) {
   return options.signal.aborted ? { TAG: "Err", _0: "Tool call was cancelled." } : { TAG: "Ok" };
 }
-export function useTools(session) {
-  const ready = Session.ready(session);
+export function useTools(session, ready) {
   const state = useWebMCP({
     name: "get_board",
     description:
@@ -144,38 +144,32 @@ export function useTools(session) {
         let value = result$4._0;
         const value$1 = $stripPrefix(window.location.hash, "#room=") ?? "local";
         $jsonIndexMut(
-          {
-            get value() {
-              return value;
-            },
-            set value(newValue) {
+          $handle(
+            () => value,
+            (newValue) => {
               value = newValue;
             },
-          },
+          ),
           "boardId",
         ).value = { TAG: "String", _0: value$1 };
         const mode = Session.mode(session);
         $jsonIndexMut(
-          {
-            get value() {
-              return value;
-            },
-            set value(newValue) {
+          $handle(
+            () => value,
+            (newValue) => {
               value = newValue;
             },
-          },
+          ),
           "mode",
         ).value = { TAG: "String", _0: mode };
         const connected = Session.connected(session);
         $jsonIndexMut(
-          {
-            get value() {
-              return value;
-            },
-            set value(newValue) {
+          $handle(
+            () => value,
+            (newValue) => {
               value = newValue;
             },
-          },
+          ),
           "connected",
         ).value = { TAG: "Bool", _0: connected };
         const map = new Map();
@@ -183,14 +177,12 @@ export function useTools(session) {
         map.set("maxPoints", { TAG: "Number", _0: $jsonInt(20000) });
         map.set("maxCommandBytes", { TAG: "Number", _0: $jsonInt(1048576) });
         $jsonIndexMut(
-          {
-            get value() {
-              return value;
-            },
-            set value(newValue) {
+          $handle(
+            () => value,
+            (newValue) => {
               value = newValue;
             },
-          },
+          ),
           "limits",
         ).value = { TAG: "Object", _0: map };
         return { TAG: "Ok", _0: value };
@@ -281,7 +273,7 @@ export function useTools(session) {
   const apply = useWebMCP({
     name: "apply_operations",
     description:
-      "Draw and edit freely in one atomic batch. Supply a unique commandId and operations. Create example: {op:'create',id:'bird-wing',drawing:{geometry:{kind:'path',segments:[{op:'M',x:1000,y:1000},{op:'C',cx1:1400,cy1:600,cx2:1700,cy2:1100,x:2100,y:800}]},style:{stroke:'#243b35',width:12,fill:null}}}. Also create stroke points or text, replace/delete with expectedVersion, erase with targets/points/radius, clear with expectedSequence, or standalone undo/redo. World coordinates, no scripts or stamps. Identical commandId retries return the original receipt without drawing twice. Returns after durable acceptance and attempted local presentation.",
+      "Draw and edit freely in one atomic batch. Supply a unique commandId and operations. Create example: {op:'create',id:'bird-wing',drawing:{geometry:{kind:'path',segments:[{op:'M',x:1000,y:1000},{op:'C',cx1:1400,cy1:600,cx2:1700,cy2:1100,x:2100,y:800}]},style:{stroke:'#243b35',width:12,fill:null}}}. Also create stroke points or text, replace/delete with expectedVersion, erase with targets/points/radius, clear with expectedSequence, or standalone undo/redo. Paint stroke/fill accepts #RRGGBB or {kind:'linear',x0,y0,x1,y1,stops:[{offset:0,color:'#ffdd88'},{offset:1,color:'#d85a04'}]}, or {kind:'radial',cx,cy,radius,stops}. Stop opacity is 0–1. Stroke geometry supports style.brush={kind:'soft',softness:0.8} or {kind:'textured',grain:0.5,seed:42}; marker is the default. Drawing clip={segments:[M/L/Q/C/Z...],transform:[1,0,0,1,0,0]} keeps paint inside a local path and moves with the drawing. World coordinates, no scripts or stamps. Identical commandId retries return the original receipt without drawing twice. Returns after durable acceptance and attempted local presentation.",
     inputSchema: Webmcp.schema("apply"),
     annotations: annotations(false),
     enabled: ready,

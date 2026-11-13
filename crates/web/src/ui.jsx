@@ -155,7 +155,83 @@ export function submit(session, command, problem, failed) {
                       : item.drawing.geometry.TAG === "Text"
                         ? { ...item.drawing.geometry }
                         : item.drawing.geometry,
-                style: { ...item.drawing.style },
+                clip:
+                  item.drawing.clip == null
+                    ? item.drawing.clip
+                    : {
+                        ...item.drawing.clip,
+                        segments: item.drawing.clip.segments.map((item) =>
+                          item.TAG === "M"
+                            ? { ...item }
+                            : item.TAG === "L"
+                              ? { ...item }
+                              : item.TAG === "Q"
+                                ? { ...item }
+                                : item.TAG === "C"
+                                  ? { ...item }
+                                  : item,
+                        ),
+                        transform: item.drawing.clip.transform.slice(),
+                      },
+                style: {
+                  ...item.drawing.style,
+                  stroke:
+                    item.drawing.style.stroke.TAG === "Color"
+                      ? { ...item.drawing.style.stroke }
+                      : item.drawing.style.stroke.TAG === "Gradient"
+                        ? {
+                            ...item.drawing.style.stroke,
+                            _0:
+                              item.drawing.style.stroke._0.TAG === "Linear"
+                                ? {
+                                    ...item.drawing.style.stroke._0,
+                                    stops: item.drawing.style.stroke._0.stops.map((item) => ({
+                                      ...item,
+                                    })),
+                                  }
+                                : item.drawing.style.stroke._0.TAG === "Radial"
+                                  ? {
+                                      ...item.drawing.style.stroke._0,
+                                      stops: item.drawing.style.stroke._0.stops.map((item) => ({
+                                        ...item,
+                                      })),
+                                    }
+                                  : item.drawing.style.stroke._0,
+                          }
+                        : item.drawing.style.stroke,
+                  fill:
+                    item.drawing.style.fill == null
+                      ? item.drawing.style.fill
+                      : item.drawing.style.fill.TAG === "Color"
+                        ? { ...item.drawing.style.fill }
+                        : item.drawing.style.fill.TAG === "Gradient"
+                          ? {
+                              ...item.drawing.style.fill,
+                              _0:
+                                item.drawing.style.fill._0.TAG === "Linear"
+                                  ? {
+                                      ...item.drawing.style.fill._0,
+                                      stops: item.drawing.style.fill._0.stops.map((item) => ({
+                                        ...item,
+                                      })),
+                                    }
+                                  : item.drawing.style.fill._0.TAG === "Radial"
+                                    ? {
+                                        ...item.drawing.style.fill._0,
+                                        stops: item.drawing.style.fill._0.stops.map((item) => ({
+                                          ...item,
+                                        })),
+                                      }
+                                    : item.drawing.style.fill._0,
+                            }
+                          : item.drawing.style.fill,
+                  brush:
+                    item.drawing.style.brush.TAG === "Soft"
+                      ? { ...item.drawing.style.brush }
+                      : item.drawing.style.brush.TAG === "Textured"
+                        ? { ...item.drawing.style.brush }
+                        : item.drawing.style.brush,
+                },
                 transform: item.drawing.transform.slice(),
               },
             }
@@ -188,7 +264,83 @@ export function submit(session, command, problem, failed) {
                         : item.drawing.geometry.TAG === "Text"
                           ? { ...item.drawing.geometry }
                           : item.drawing.geometry,
-                  style: { ...item.drawing.style },
+                  clip:
+                    item.drawing.clip == null
+                      ? item.drawing.clip
+                      : {
+                          ...item.drawing.clip,
+                          segments: item.drawing.clip.segments.map((item) =>
+                            item.TAG === "M"
+                              ? { ...item }
+                              : item.TAG === "L"
+                                ? { ...item }
+                                : item.TAG === "Q"
+                                  ? { ...item }
+                                  : item.TAG === "C"
+                                    ? { ...item }
+                                    : item,
+                          ),
+                          transform: item.drawing.clip.transform.slice(),
+                        },
+                  style: {
+                    ...item.drawing.style,
+                    stroke:
+                      item.drawing.style.stroke.TAG === "Color"
+                        ? { ...item.drawing.style.stroke }
+                        : item.drawing.style.stroke.TAG === "Gradient"
+                          ? {
+                              ...item.drawing.style.stroke,
+                              _0:
+                                item.drawing.style.stroke._0.TAG === "Linear"
+                                  ? {
+                                      ...item.drawing.style.stroke._0,
+                                      stops: item.drawing.style.stroke._0.stops.map((item) => ({
+                                        ...item,
+                                      })),
+                                    }
+                                  : item.drawing.style.stroke._0.TAG === "Radial"
+                                    ? {
+                                        ...item.drawing.style.stroke._0,
+                                        stops: item.drawing.style.stroke._0.stops.map((item) => ({
+                                          ...item,
+                                        })),
+                                      }
+                                    : item.drawing.style.stroke._0,
+                            }
+                          : item.drawing.style.stroke,
+                    fill:
+                      item.drawing.style.fill == null
+                        ? item.drawing.style.fill
+                        : item.drawing.style.fill.TAG === "Color"
+                          ? { ...item.drawing.style.fill }
+                          : item.drawing.style.fill.TAG === "Gradient"
+                            ? {
+                                ...item.drawing.style.fill,
+                                _0:
+                                  item.drawing.style.fill._0.TAG === "Linear"
+                                    ? {
+                                        ...item.drawing.style.fill._0,
+                                        stops: item.drawing.style.fill._0.stops.map((item) => ({
+                                          ...item,
+                                        })),
+                                      }
+                                    : item.drawing.style.fill._0.TAG === "Radial"
+                                      ? {
+                                          ...item.drawing.style.fill._0,
+                                          stops: item.drawing.style.fill._0.stops.map((item) => ({
+                                            ...item,
+                                          })),
+                                        }
+                                      : item.drawing.style.fill._0,
+                              }
+                            : item.drawing.style.fill,
+                    brush:
+                      item.drawing.style.brush.TAG === "Soft"
+                        ? { ...item.drawing.style.brush }
+                        : item.drawing.style.brush.TAG === "Textured"
+                          ? { ...item.drawing.style.brush }
+                          : item.drawing.style.brush,
+                  },
                   transform: item.drawing.transform.slice(),
                 },
               }

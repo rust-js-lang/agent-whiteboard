@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use webapi::{
     CanvasRenderingContext2D, HTMLCanvasElement, canvas_contexts, document, path2_d, tags,
 };
-use whiteboard_core::{Drawing, Element, Geometry, Point, Segment, Snapshot, mask_data, path_data};
+use whiteboard_core::{
+    Brush, Drawing, Element, Geometry, Gradient, Paint, Point, Segment, Snapshot, ink_layers,
+    inverse, mask_data, path_data, segment_data,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +89,7 @@ fn transform(ctx: &CanvasRenderingContext2D, matrix: [f64; 6]) {
 #[derive(Default)]
 pub struct Renderer {
     paths: RefCell<HashMap<String, &'static webapi::Path2D>>,
+    ink: RefCell<HashMap<String, Vec<(&'static webapi::Path2D, f64)>>>,
 }
 impl Renderer {
     fn path(&self, drawing: &Drawing) -> Result<&'static webapi::Path2D, String> {
@@ -103,6 +107,22 @@ impl Renderer {
         cache.insert(key, path);
         Ok(path)
     }
+    fn ink(&self, drawing: &Drawing) -> Result<Vec<(&'static webapi::Path2D, f64)>, String> {
+        let key = serde_json::to_string(drawing).map_err(|e| e.to_string())?;
+        if let Some(paths) = self.ink.borrow().get(&key) {
+            return Ok(paths.clone());
+        }
+        let paths = ink_layers(drawing)?
+            .into_iter()
+            .map(|layer| (path2_d::new(Some(&layer.path)), layer.opacity))
+            .collect::<Vec<_>>();
+        let mut cache = self.ink.borrow_mut();
+        if cache.len() >= 500 {
+            cache.clear();
+        }
+        cache.insert(key, paths.clone());
+        Ok(paths)
+    }
     fn geometry(&self, ctx: &CanvasRenderingContext2D, element: &Element) -> Result<(), String> {
         let drawing = &element.drawing;
         let style = &drawing.style;
@@ -110,12 +130,24 @@ impl Renderer {
         ctx.set_line_cap("round");
         ctx.set_line_join("round");
         ctx.set_line_width(style.width);
-        ctx.set_stroke_style(&style.stroke);
-        ctx.set_fill_style(style.fill.as_deref().unwrap_or(&style.stroke));
+        if let Some(clip) = &drawing.clip {
+            transform(ctx, clip.transform);
+            ctx.clip_with_path(
+                path2_d::new(Some(&segment_data(&clip.segments))),
+                Some("nonzero"),
+            );
+            transform(ctx, inverse(clip.transform));
+        }
+        set_paint(ctx, &style.stroke, true);
+        set_paint(ctx, style.fill.as_ref().unwrap_or(&style.stroke), false);
         match &drawing.geometry {
             Geometry::Stroke { .. } => {
-                ctx.set_fill_style(&style.stroke);
-                ctx.fill_with_path(self.path(drawing)?, Some("nonzero"));
+                set_paint(ctx, &style.stroke, false);
+                for (path, opacity) in self.ink(drawing)? {
+                    ctx.set_global_alpha(opacity);
+                    ctx.fill_with_path(path, Some("nonzero"));
+                }
+                ctx.set_global_alpha(1.0);
             }
             Geometry::Path { .. } => {
                 let path = self.path(drawing)?;
@@ -127,7 +159,7 @@ impl Renderer {
             Geometry::Text { x, y, text, size } => {
                 ctx.set_font(&format!("{size}px 'DM Sans', sans-serif"));
                 ctx.set_text_baseline("alphabetic");
-                ctx.set_fill_style(&style.stroke);
+                set_paint(ctx, &style.stroke, false);
                 for (index, line) in text.split('\n').enumerate() {
                     ctx.fill_text(line, *x, *y + index as f64 * size * 1.3, None);
                 }
@@ -178,7 +210,9 @@ impl Renderer {
         }
         let mut layer = None;
         for element in &snapshot.elements {
-            let isolated = !element.masks.is_empty() || element.drawing.style.opacity < 1.0;
+            let isolated = !element.masks.is_empty()
+                || element.drawing.style.opacity < 1.0
+                || !matches!(element.drawing.style.brush, Brush::Marker);
             let destination = if isolated {
                 let surface = *layer.get_or_insert_with(|| new_canvas(width, height));
                 surface.set_width(width);
@@ -359,11 +393,84 @@ fn matrix_text(matrix: [f64; 6]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+fn stop_color(stop: &whiteboard_core::ColorStop) -> String {
+    let r = u8::from_str_radix(&stop.color[1..3], 16).expect("validated red");
+    let g = u8::from_str_radix(&stop.color[3..5], 16).expect("validated green");
+    let b = u8::from_str_radix(&stop.color[5..7], 16).expect("validated blue");
+    format!("rgba({r},{g},{b},{})", stop.opacity)
+}
+fn set_paint(ctx: &CanvasRenderingContext2D, paint: &Paint, stroke: bool) {
+    match paint {
+        Paint::Color(color) => {
+            if stroke {
+                ctx.set_stroke_style(color);
+            } else {
+                ctx.set_fill_style(color);
+            }
+        }
+        Paint::Gradient(paint) => {
+            let gradient = match paint {
+                Gradient::Linear { x0, y0, x1, y1, .. } => {
+                    ctx.create_linear_gradient(*x0, *y0, *x1, *y1)
+                }
+                Gradient::Radial { cx, cy, radius, .. } => {
+                    ctx.create_radial_gradient(*cx, *cy, 0.0, *cx, *cy, *radius)
+                }
+            };
+            for stop in paint.stops() {
+                gradient.add_color_stop(stop.offset, &stop_color(stop));
+            }
+            if stroke {
+                ctx.set_stroke_style(gradient);
+            } else {
+                ctx.set_fill_style(gradient);
+            }
+        }
+    }
+}
+fn svg_paint(paint: &Paint, id: &str, definitions: &mut String) -> String {
+    match paint {
+        Paint::Color(color) => color.clone(),
+        Paint::Gradient(gradient) => {
+            let (tag, attributes) = match gradient {
+                Gradient::Linear { x0, y0, x1, y1, .. } => (
+                    "linearGradient",
+                    format!("x1=\"{x0}\" y1=\"{y0}\" x2=\"{x1}\" y2=\"{y1}\""),
+                ),
+                Gradient::Radial { cx, cy, radius, .. } => (
+                    "radialGradient",
+                    format!("cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\""),
+                ),
+            };
+            definitions.push_str(&format!(
+                "<defs><{tag} id=\"{id}\" gradientUnits=\"userSpaceOnUse\" {attributes}>"
+            ));
+            for stop in gradient.stops() {
+                definitions.push_str(&format!(
+                    "<stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{}\"/>",
+                    stop.offset, stop.color, stop.opacity
+                ));
+            }
+            definitions.push_str(&format!("</{tag}></defs>"));
+            format!("url(#{id})")
+        }
+    }
+}
 pub fn svg(snapshot: &Snapshot) -> Result<String, String> {
     let mut body = String::new();
     for element in &snapshot.elements {
         let drawing = &element.drawing;
         let style = &drawing.style;
+        let stroke_paint = svg_paint(&style.stroke, &format!("stroke-{}", element.id), &mut body);
+        let fill_paint = style
+            .fill
+            .as_ref()
+            .map(|paint| svg_paint(paint, &format!("fill-{}", element.id), &mut body))
+            .unwrap_or_else(|| "none".into());
+        let clip_id = format!("clip-{}", element.id);
+        if let Some(clip) = &drawing.clip {
+            body.push_str(&format!("<defs><clipPath id=\"{clip_id}\" clipPathUnits=\"userSpaceOnUse\"><path d=\"{}\" transform=\"matrix({})\"/></clipPath></defs>",segment_data(&clip.segments),matrix_text(clip.transform)));
+        }
         let mask_id = format!("mask-{}", element.id);
         if !element.masks.is_empty() {
             body.push_str(&format!("<defs><mask id=\"{mask_id}\" maskUnits=\"userSpaceOnUse\" x=\"-1000000\" y=\"-1000000\" width=\"2000000\" height=\"2000000\"><rect x=\"-1000000\" y=\"-1000000\" width=\"2000000\" height=\"2000000\" fill=\"white\"/>"));
@@ -386,25 +493,31 @@ pub fn svg(snapshot: &Snapshot) -> Result<String, String> {
             matrix_text(drawing.transform),
             style.opacity
         ));
+        if drawing.clip.is_some() {
+            body.push_str(&format!("<g clip-path=\"url(#{clip_id})\">"));
+        }
         match &drawing.geometry {
-            Geometry::Text { x, y, text, size } => {
-                for (index, line) in text.split('\n').enumerate() {
-                    body.push_str(&format!("<text x=\"{x}\" y=\"{}\" font-size=\"{size}\" font-family=\"DM Sans,sans-serif\" fill=\"{}\">{}</text>",y+index as f64*size*1.3,style.stroke,escape(line)));
+            Geometry::Stroke { .. } => {
+                for layer in ink_layers(drawing)? {
+                    body.push_str(&format!(
+                        "<path d=\"{}\" fill=\"{stroke_paint}\" opacity=\"{}\"/>",
+                        layer.path, layer.opacity
+                    ));
                 }
             }
-            other => {
-                let stroke = if matches!(other, Geometry::Stroke { .. }) {
-                    "none"
-                } else {
-                    &style.stroke
-                };
-                let fill = if matches!(other, Geometry::Stroke { .. }) {
-                    &style.stroke
-                } else {
-                    style.fill.as_deref().unwrap_or("none")
-                };
+            Geometry::Text { x, y, text, size } => {
+                for (index, line) in text.split('\n').enumerate() {
+                    body.push_str(&format!("<text x=\"{x}\" y=\"{}\" font-size=\"{size}\" font-family=\"DM Sans,sans-serif\" fill=\"{}\">{}</text>",y+index as f64*size*1.3,stroke_paint,escape(line)));
+                }
+            }
+            Geometry::Path { .. } => {
+                let stroke = &stroke_paint;
+                let fill = &fill_paint;
                 body.push_str(&format!("<path d=\"{}\" fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill-rule=\"nonzero\"/>",path_data(drawing)?,style.width));
             }
+        }
+        if drawing.clip.is_some() {
+            body.push_str("</g>");
         }
         body.push_str("</g>");
     }

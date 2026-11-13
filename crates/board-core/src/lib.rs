@@ -1,4 +1,7 @@
 //! Shared document authority. Browser and server execute these same transitions.
+mod painting;
+pub use painting::{Brush, Clip, ColorStop, Gradient, InkLayer, Paint, Style, ink_layers};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -20,12 +23,6 @@ fn one() -> f64 {
 }
 fn identity() -> [f64; 6] {
     [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
-}
-fn default_width() -> f64 {
-    8.0
-}
-fn default_color() -> String {
-    "#243b35".into()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,27 +69,11 @@ pub enum Geometry {
     },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
-pub struct Style {
-    pub stroke: String,
-    pub fill: Option<String>,
-    pub width: f64,
-    pub opacity: f64,
-}
-impl Default for Style {
-    fn default() -> Self {
-        Self {
-            stroke: default_color(),
-            fill: None,
-            width: default_width(),
-            opacity: 1.0,
-        }
-    }
-}
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Drawing {
     pub geometry: Geometry,
+    #[serde(default)]
+    pub clip: Option<Clip>,
     #[serde(default)]
     pub style: Style,
     #[serde(default = "identity")]
@@ -267,7 +248,7 @@ fn points_valid(points: &[Point]) -> bool {
 fn matrix_valid(m: &[f64; 6]) -> bool {
     m.iter().all(|v| coordinate(*v)) && (m[0] * m[3] - m[1] * m[2]).abs() > 0.000001
 }
-fn inverse(m: [f64; 6]) -> [f64; 6] {
+pub fn inverse(m: [f64; 6]) -> [f64; 6] {
     let determinant = m[0] * m[3] - m[1] * m[2];
     [
         m[3] / determinant,
@@ -281,9 +262,18 @@ fn inverse(m: [f64; 6]) -> [f64; 6] {
 impl Drawing {
     pub fn validate(&self) -> Result<(), String> {
         let style = &self.style;
-        if !color(&style.stroke)
-            || style.fill.as_ref().is_some_and(|c| !color(c))
-            || !style.width.is_finite()
+        style.stroke.validate()?;
+        if let Some(fill) = &style.fill {
+            fill.validate()?;
+        }
+        style.brush.validate(&self.geometry, style.width)?;
+        if let Some(clip) = &self.clip {
+            if !matrix_valid(&clip.transform) {
+                return Err("Clip transform must be finite and invertible.".into());
+            }
+            validate_segments(&clip.segments)?;
+        }
+        if !style.width.is_finite()
             || style.width <= 0.0
             || style.width > 500.0
             || !style.opacity.is_finite()
@@ -294,29 +284,48 @@ impl Drawing {
         }
         match &self.geometry {
             Geometry::Stroke { points } if points_valid(points) => Ok(()),
-            Geometry::Path { segments } if !segments.is_empty() && segments.len() <= MAX_POINTS && matches!(segments.first(), Some(Segment::M { .. })) => {
-                for segment in segments {
-                    let values = match segment {
-                        Segment::M { x, y } | Segment::L { x, y } => vec![*x, *y],
-                        Segment::Q { cx, cy, x, y } => vec![*cx, *cy, *x, *y],
-                        Segment::C { cx1, cy1, cx2, cy2, x, y } => vec![*cx1, *cy1, *cx2, *cy2, *x, *y],
-                        Segment::Z => Vec::new(),
-                    };
-                    if !values.iter().all(|v| coordinate(*v)) { return Err("Path coordinates must be finite and within the supported board range.".into()); }
-                }
-                Ok(())
-            }
+            Geometry::Path { segments } => validate_segments(segments),
             Geometry::Text { x, y, text, size } if coordinate(*x) && coordinate(*y) && !text.is_empty() && text.len() <= 8000 && size.is_finite() && *size >= 4.0 && *size <= 500.0 => Ok(()),
             _ => Err("Invalid geometry. Supply stroke points, a path beginning with M, or nonempty text.".into()),
         }
     }
     fn point_count(&self) -> usize {
-        match &self.geometry {
-            Geometry::Stroke { points } => points.len(),
-            Geometry::Path { segments } => segments.len(),
-            Geometry::Text { .. } => 0,
+        self.clip.as_ref().map_or(0, |clip| clip.segments.len())
+            + match &self.geometry {
+                Geometry::Stroke { points } => points.len(),
+                Geometry::Path { segments } => segments.len(),
+                Geometry::Text { .. } => 0,
+            }
+    }
+}
+pub fn validate_segments(segments: &[Segment]) -> Result<(), String> {
+    if segments.is_empty()
+        || segments.len() > MAX_POINTS
+        || !matches!(segments.first(), Some(Segment::M { .. }))
+    {
+        return Err("A path needs 1–20000 segments beginning with M.".into());
+    }
+    for segment in segments {
+        let values = match segment {
+            Segment::M { x, y } | Segment::L { x, y } => vec![*x, *y],
+            Segment::Q { cx, cy, x, y } => vec![*cx, *cy, *x, *y],
+            Segment::C {
+                cx1,
+                cy1,
+                cx2,
+                cy2,
+                x,
+                y,
+            } => vec![*cx1, *cy1, *cx2, *cy2, *x, *y],
+            Segment::Z => Vec::new(),
+        };
+        if !values.iter().all(|v| coordinate(*v)) {
+            return Err(
+                "Path coordinates must be finite and within the supported board range.".into(),
+            );
         }
     }
+    Ok(())
 }
 fn ordered(elements: &mut [Element]) {
     elements.sort_by(|a, b| a.order.cmp(&b.order).then(a.id.cmp(&b.id)));
@@ -805,27 +814,30 @@ pub fn path_data(drawing: &Drawing) -> Result<String, String> {
     drawing.validate()?;
     let path = match &drawing.geometry {
         Geometry::Stroke { points } => ink_path(points, drawing.style.width),
-        Geometry::Path { segments } => segments
-            .iter()
-            .map(|s| match s {
-                Segment::M { x, y } => format!("M {x} {y}"),
-                Segment::L { x, y } => format!("L {x} {y}"),
-                Segment::Q { cx, cy, x, y } => format!("Q {cx} {cy} {x} {y}"),
-                Segment::C {
-                    cx1,
-                    cy1,
-                    cx2,
-                    cy2,
-                    x,
-                    y,
-                } => format!("C {cx1} {cy1} {cx2} {cy2} {x} {y}"),
-                Segment::Z => "Z".into(),
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        Geometry::Path { segments } => segment_data(segments),
         Geometry::Text { .. } => String::new(),
     };
     Ok(path)
+}
+pub fn segment_data(segments: &[Segment]) -> String {
+    segments
+        .iter()
+        .map(|s| match s {
+            Segment::M { x, y } => format!("M {x} {y}"),
+            Segment::L { x, y } => format!("L {x} {y}"),
+            Segment::Q { cx, cy, x, y } => format!("Q {cx} {cy} {x} {y}"),
+            Segment::C {
+                cx1,
+                cy1,
+                cx2,
+                cy2,
+                x,
+                y,
+            } => format!("C {cx1} {cy1} {cx2} {cy2} {x} {y}"),
+            Segment::Z => "Z".into(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 pub fn mask_data(mask: &Mask) -> Result<String, String> {
     if !points_valid(&mask.points)
@@ -850,6 +862,7 @@ mod tests {
     use super::*;
     fn drawing() -> Drawing {
         Drawing {
+            clip: None,
             geometry: Geometry::Stroke {
                 points: vec![
                     Point {
@@ -1031,6 +1044,7 @@ mod tests {
     #[test]
     fn paths_preserve_cubic_geometry_and_pressure_outlines() {
         let draw = Drawing {
+            clip: None,
             geometry: Geometry::Path {
                 segments: vec![
                     Segment::M { x: 0.0, y: 1.0 },
@@ -1117,7 +1131,10 @@ mod tests {
             .accept(command("redo", vec![Operation::Redo]), "alice")
             .unwrap()
             .journal;
-        assert_eq!(redo.elements[0].drawing.style.stroke, "#ff0000");
+        assert_eq!(
+            redo.elements[0].drawing.style.stroke,
+            Paint::from("#ff0000")
+        );
     }
 
     #[test]
@@ -1159,6 +1176,9 @@ mod tests {
             .accept(command("re", vec![Operation::Redo]), "alice")
             .unwrap()
             .journal;
-        assert_eq!(redo_edit.elements[0].drawing.style.stroke, "#ff0000");
+        assert_eq!(
+            redo_edit.elements[0].drawing.style.stroke,
+            Paint::from("#ff0000")
+        );
     }
 }

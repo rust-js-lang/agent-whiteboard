@@ -33,6 +33,10 @@ export function newCanvas(width: number, height: number): HTMLCanvasElement;
 
 export interface Renderer {
     paths: Map<string, Path2D>;
+    ink: Map<string, [
+        Path2D,
+        number
+    ][]>;
 }
 
 export const Renderer: {
