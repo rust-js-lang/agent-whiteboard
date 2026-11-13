@@ -1,6 +1,8 @@
 # AgentWhiteboard design and implementation plan
 
-Status: proposed architecture. Date: 2026-11-13.
+Status: initial implementation available; longer-term architecture below. Updated: 2026-11-14.
+
+The initial release implements a Rust/rust-js browser UI, Canvas drawing, native WebMCP, IndexedDB, undo/redo, replay, offline assets, and a Rust/SQLite shared server. Shared clients currently poll every 700 ms. Board resizing, grouping, granular roles, WebSocket transport, and import controls described below are planned, not shipped. See the README for current commands and limitations.
 
 ## Product and drawing experience
 

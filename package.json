@@ -1,0 +1,38 @@
+{
+  "name": "agent-whiteboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "scripts": {
+    "setup": "bun install --frozen-lockfile && bun install --cwd rust-js --frozen-lockfile --ignore-scripts && bun run patch:compiler",
+    "patch:compiler": "bun scripts/patch-rust-js.ts",
+    "compile": "bun run patch:compiler && bun rust-js/tooling/cli.js build --package agent-whiteboard-web",
+    "build": "bun run compile && bun run bundle",
+    "bundle": "bunx --bun vite build web && bun scripts/offline.ts",
+    "dev": "bun run compile && bunx --bun vite web",
+    "preview": "bunx --bun vite preview web",
+    "check": "bun scripts/check-source.ts && bunx --bun tsc --noEmit && cargo fmt --package whiteboard-core --package whiteboard-server --package agent-whiteboard-web -- --check && cargo clippy --locked --package whiteboard-core --package whiteboard-server --all-targets -- -D warnings && bun rust-js/tooling/cli.js build --package agent-whiteboard-web --check && bun rust-js/tooling/cli.js clippy --package agent-whiteboard-web -- -D warnings",
+    "test:core": "cargo test --locked --package whiteboard-core --package whiteboard-server && bun rust-js/tooling/cli.js test --package whiteboard-core",
+    "test": "bunx --bun playwright test",
+    "server": "cargo run --locked --package whiteboard-server"
+  },
+  "dependencies": {
+    "@fontsource/dm-sans": "5.3.0",
+    "@rust-js/std": "file:rust-js/std",
+    "idb": "8.0.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "use-webmcp-tool": "0.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/bun": "latest",
+    "@types/pngjs": "6.0.5",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "pngjs": "7.0.0",
+    "typescript": "latest",
+    "vite": "8.3.8"
+  }
+}

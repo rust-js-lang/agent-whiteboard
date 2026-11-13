@@ -1,0 +1,227 @@
+diff --git a/docs/decisions/0257-spawning-closure-async-arrow.md b/docs/decisions/0257-spawning-closure-async-arrow.md
+index b10364321..7ce023d66 100644
+--- a/docs/decisions/0257-spawning-closure-async-arrow.md
++++ b/docs/decisions/0257-spawning-closure-async-arrow.md
+@@ -1,41 +1,36 @@
+-# 0257. A closure that only spawns an async block is an async arrow
++# 0257. A spawning unit closure preserves its return value
+ 
+-Status: Accepted.
++Status: Accepted; corrected after a browser application exposed an observable difference.
+ 
+-Case: A ([0262](0262-when-rust-and-js-disagree.md)).
++Case: Results change; preserve Rust's unit result (ADR 0262).
+ 
+ ## Context
+ 
+-react.dev's BrandMenu copies a color as a menu item's handler:
++The original decision replaced a unit closure that only starts an async block
++with that block's async arrow, on the assumption that nothing reads its unit
++result. JavaScript bindings invalidate that assumption. React inspects an
++effect's return value as a possible cleanup; a Promise is not a cleanup function.
++The transformed callback can therefore fail when React unmounts it.
+ 
+-```tsx
+-<MenuItem onSelect={async () => { await navigator.clipboard.writeText('#58C4DC'); }}>
+-```
+-
+-The handler's Rust is a `Box<dyn Fn()>`, as another item's handler isn't
+-async: `|| js::spawn(Box::new(async { .. }))`, which rust-js wrote as an
+-arrow calling an async one:
++## Decision
+ 
+-```js
+-() => {
+-  (async () => { await navigator.clipboard.writeText("#58C4DC"); })();
+-}
+-```
++A closure returning unit must continue to return undefined, including when its
++only statement starts a future with js::spawn. Keep the synchronous callback
++around the immediately invoked async block. Actual async closures remain async.
+ 
+-## Decision
++Do not infer that an external consumer ignores callback results from Rust's
++unit return type. No React-specific exception or second callback catalog is
++needed: preserve the callback's result for all consumers.
+ 
+-**A closure giving `()` whose body only spawns an async block is that
+-block's async arrow.**
++## Proof
+ 
+-```js
+-async () => { await navigator.clipboard.writeText("#58C4DC"); }
+-```
++The lowering regression calls a spawning unit callback from JavaScript, asserts
++that its immediate result is undefined, then checks that the spawned work ran.
++It failed with the old async-arrow rewrite. A mutation restores that rewrite.
+ 
+-## Why
++## Consequences
+ 
+-- **It runs the same**: calling it runs the block to its first `await`,
+-  as calling the async arrow did; it gives back a promise where it gave
+-  `undefined`, which a `()` is never read for.
+-- **It's the JS a person writes.**
+-- **It's tested**: a compiler test calls such a handler and finds what
+-  it spawned done; a mutation writes the arrow again.
++Spawning event callbacks retain an extra synchronous function boundary. This is
++required for correctness; ordinary async callbacks still compile directly to
++async JavaScript functions. This supersedes the original claim that returning
++a Promise in place of undefined had no observable difference.
+diff --git a/docs/decisions/README.md b/docs/decisions/README.md
+index 1ad729b2d..14aed133f 100644
+--- a/docs/decisions/README.md
++++ b/docs/decisions/README.md
+@@ -313,7 +313,7 @@ reordered, and git merges this file by keeping both sides' lines
+ - [0254 A key or ref that does nothing is captured in no order](0254-pure-key-ref.md)
+ - [0255 next/router's events](0255-next-router-events.md)
+ - [0256 A namespace import is named as the module of its bindings](0256-namespace-import-names.md) *(amended: a namespace named as its path names it, `* as Name` (the user's decision))*
+-- [0257 A closure that only spawns an async block is an async arrow](0257-spawning-closure-async-arrow.md)
++- [0257 A spawning unit closure preserves its return value](0257-spawning-closure-async-arrow.md)
+ - [0258 A promise's then, a module of a component, next/head and the Router](0258-search-bindings.md)
+ - [0259 A module's constant element, and an image's title](0259-constant-elements.md)
+ - [0260 A binding's callback parameter, and IntersectionObserver](0260-webapi-callbacks.md) *(amended by 0653: a function JS gives is a `dyn Fn`; amended by 0869: one the API calls once is an `FnOnce`)*
+diff --git a/docs/finding-wrong-answers.md b/docs/finding-wrong-answers.md
+index efc515721..bf544587e 100644
+--- a/docs/finding-wrong-answers.md
++++ b/docs/finding-wrong-answers.md
+@@ -21,6 +21,7 @@ say.
+ 
+ | Technique | Where | What it found | Why it works |
+ |---|---|---|---|
++| Inspect generated callbacks at their JavaScript consumer boundary | A browser effect, then test/lowering-functions.test.ts (ADR 0257, corrected) | A unit callback starting a future became an async arrow returning a Promise, which React interpreted as a cleanup | Rust's unit result does not prove a JavaScript consumer ignores it; assert the immediate return value as well as the eventual side effects |
+ | Decision coverage: which answers of the compiler's decisions the nets' programs reach | `bun run decision-coverage` (ADR 1124, `src/decisions.rs`): each decision's owner counts its answers where it gives them, every net runs with `RUST_JS_DECISIONS`, and the report lists the answers no program reaches, and those one build, one shape or one net alone reaches | Each nightly's `decision coverage` job; its first gap, 2026-11-11: `writer-options`' `shown` | A wrong answer hides where no program reaches a decision's answer, however many run: #1349's overlapping swap was one no generator wrote. A gap is measured, then a template or a case is written for it |
+ | Rustlantis's custom MIR programs, natively on wasm32 and as JS | `test/rustlantis.test.ts` (ADR 1125), the nightly's 1,000 seeds | #1380 (a wide literal cast through a lossy `Number`), #1381 (a raw pointer to a by-value parameter), #1382 (custom MIR's local used before it's written, refused), #1383 (rust-js's stack), 2026-11-11 | Programs of MIR, UB-free by construction, reach shapes of places, casts and calls no template or case writes; each failure is asked whether ordinary Rust reaches it, as both P0s did |
+ | A corpus case per behaviour, run against native in both builds | `test/corpus/`, `test/corpus.test.ts` | Most fixes' first proof | Each case pins one behaviour against native, not against a snapshot |
+diff --git a/docs/guide/interop/async.md b/docs/guide/interop/async.md
+index 67f394ccd..7e147158e 100644
+--- a/docs/guide/interop/async.md
++++ b/docs/guide/interop/async.md
+@@ -101,6 +101,11 @@ export function start() {
+ The promise is left unawaited: a panic inside it is an unhandled
+ rejection, which the host reports.
+ 
++A unit callback that spawns work remains synchronous and returns `undefined`,
++not the spawned promise. JavaScript can inspect that result: React, for example,
++expects an effect to return nothing or a cleanup function. An actual async
++closure returns a promise ([ADR 0257](../../decisions/0257-spawning-closure-async-arrow.md), corrected).
++
+ ## `js::Promise`
+ 
+ `js::Promise<T>` is a JS promise of a `T`. A binding to a JS function
+diff --git a/scripts/mutations/lower/mir/closures.ts b/scripts/mutations/lower/mir/closures.ts
+index 70ac4b4d9..65380b6f7 100644
+--- a/scripts/mutations/lower/mir/closures.ts
++++ b/scripts/mutations/lower/mir/closures.ts
+@@ -61,18 +61,12 @@ export const mutations: Mutation[] = [
+     tests: ["test/lowering-iterators.test.ts", "-t", "string's parts from MIR"],
+   },
+   {
+-    name: "mir-spawning-closure-arrow",
+-    breaks:
+-      "a closure that only spawns an async block is `() => { (async () => …)(); }`, not `async () => …`",
++    name: "mir-spawning-unit-returns-promise",
++    breaks: "a unit callback that spawns a future returns a Promise instead of undefined; JavaScript consumers such as React treat it as a cleanup",
+     file: "src/lower/mir/closures.rs",
+-    find: "            && let js::ExprKind::AsyncArrow(inner, spawned) = &callee.kind\n            && inner.is_empty()\n        {\n            return Ok(Expr::async_arrow(params, spawned.clone()));\n",
+-    replace:
+-      "            && let js::ExprKind::AsyncArrow(inner, spawned) = &callee.kind\n            && inner.is_empty()\n            && false\n        {\n            return Ok(Expr::async_arrow(params, spawned.clone()));\n",
+-    tests: [
+-      "test/lowering-functions.test.ts",
+-      "-t",
+-      "only spawns an async block",
+-    ],
++    find: "        self.place_written(written, &mut stmts);\n        stmts.splice(0..0, directives);\n        let made_at = span;\n",
++    replace: "        // A closure of `()` that only spawns an async block is that block's\n        // async arrow: it starts the same, and gives back a promise where\n        // nothing reads its `()` (ADR 0257).\n        if let ty::Closure(_, args) = self.tcx.type_of(def_id).skip_binder().kind()\n            && written.is_empty()\n            && directives.is_empty()\n            && args.as_closure().sig().output().skip_binder().is_unit()\n            && let [\n                Stmt {\n                    kind: StmtKind::Expr(call),\n                    ..\n                },\n            ] = stmts.as_slice()\n            && let js::ExprKind::Call(callee, given) = &call.kind\n            && given.is_empty()\n            && let js::ExprKind::AsyncArrow(inner, spawned) = &callee.kind\n            && inner.is_empty()\n        {\n            return Ok(Expr::async_arrow(params, spawned.clone()));\n        }\n        self.place_written(written, &mut stmts);\n        stmts.splice(0..0, directives);\n        let made_at = span;\n",
++    tests: ["test/lowering-functions.test.ts","-t","spawning unit closures"],
+   },
+   {
+     name: "mir-capture-copied-always",
+@@ -196,14 +190,6 @@ export const mutations: Mutation[] = [
+     replace: "",
+     tests: ["test/modules.test.ts", "-t", "js::directive! in a body"],
+   },
+-  {
+-    name: "mir-spawning-closure-directive-lost",
+-    breaks: "MIR's closure that only spawns loses its `js::directive!`",
+-    file: "src/lower/mir/closures.rs",
+-    find: "            && directives.is_empty()\n",
+-    replace: "",
+-    tests: ["test/modules.test.ts", "-t", "js::directive! in a body"],
+-  },
+   {
+     name: "closure-owned-by-parent",
+     breaks:
+diff --git a/src/lower/mir/closures.rs b/src/lower/mir/closures.rs
+index 7afa4342e..257ecb1f1 100644
+--- a/src/lower/mir/closures.rs
++++ b/src/lower/mir/closures.rs
+@@ -328,26 +328,9 @@ impl<'a, 'tcx> FnCx<'a, 'tcx> {
+             body.splice(0..0, directives);
+             return Ok(Expr::async_arrow(params, body));
+         }
+-        // A closure of `()` that only spawns an async block is that block's
+-        // async arrow: it starts the same, and gives back a promise where
+-        // nothing reads its `()` (ADR 0257).
+-        if let ty::Closure(_, args) = self.tcx.type_of(def_id).skip_binder().kind()
+-            && written.is_empty()
+-            && directives.is_empty()
+-            && args.as_closure().sig().output().skip_binder().is_unit()
+-            && let [
+-                Stmt {
+-                    kind: StmtKind::Expr(call),
+-                    ..
+-                },
+-            ] = stmts.as_slice()
+-            && let js::ExprKind::Call(callee, given) = &call.kind
+-            && given.is_empty()
+-            && let js::ExprKind::AsyncArrow(inner, spawned) = &callee.kind
+-            && inner.is_empty()
+-        {
+-            return Ok(Expr::async_arrow(params, spawned.clone()));
+-        }
++        // A unit closure must still give undefined to JS. Even when its only
++        // statement spawns a future, a consumer may inspect its result, as
++        // React does when deciding whether an effect supplied a cleanup.
+         self.place_written(written, &mut stmts);
+         stmts.splice(0..0, directives);
+         let made_at = span;
+diff --git a/test/lowering-functions.test.ts b/test/lowering-functions.test.ts
+index af7ce140e..35b738f87 100644
+--- a/test/lowering-functions.test.ts
++++ b/test/lowering-functions.test.ts
+@@ -294,15 +294,10 @@ pub fn both(h: Holder<bool>) -> (Holder<bool>, Holder<bool>) {
+   expect(module.both({ value: true })).toEqual([{ value: true }, { value: false }]);
+ });
+ 
+-// A JS module's namespace, `#*.Root`, whose bindings a Rust module holds,
+-// is imported by that module's name, as react.dev's BrandMenu has
+-// `import * as ContextMenu` and `<ContextMenu.Root>`.
+-// A closure that only spawns an async block is an async arrow, as
+-// react.dev's BrandMenu writes `onSelect={async () => { await
+-// navigator.clipboard.writeText(..) }}`: it starts the same, and gives
+-// back a promise where nothing reads its `()` (ADR 0257). From MIR too
+-// (ADR 0364).
+-test("a closure that only spawns an async block is an async arrow", async () => {
++// A unit callback remains synchronous when its body starts a future.
++// JavaScript may inspect its undefined result, as React effects do when
++// choosing a cleanup (ADR 0257, corrected).
++test("spawning unit closures preserve undefined for JavaScript consumers", async () => {
+   const dir = fixture("spawning-closure");
+   writeFileSync(join(dir, "copy.js"), "export const copied = [];\nexport async function copy(text) { copied.push(text); }\n");
+   writeFileSync(join(dir, "lib.rs"), `#[cfg_attr(rust_js, rust_js::link_name = "./copy.js#copy")] fn copy(text: &str) -> js::Promise<()> { unreachable!() }
+@@ -318,10 +313,12 @@ pub fn handler() -> Box<dyn Fn()> {
+   const { copied } = await import(join(dir, "copy.js"));
+   run([compiler, join(dir, "lib.rs"), "-o", join(dir, "mir.js"), "--", "--extern", `js=${join(target, "libjs.rmeta")}`, "-L", target]);
+   const js = readFileSync(join(dir, "mir.js"), "utf8");
+-  expect(js).toContain('return async () => {\n    await copy("#58C4DC");\n  };');
++  expect(js).not.toContain("return async");
+   const lib = await import(join(dir, "mir.js"));
+   copied.length = 0;
+-  await lib.handler()();
++  // React inspects this result as a possible cleanup; a Promise is invalid.
++  expect(lib.handler()()).toBeUndefined();
++  await Promise.resolve();
+   expect(copied).toEqual(["#58C4DC"]);
+ });
+ 

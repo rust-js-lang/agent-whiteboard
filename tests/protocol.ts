@@ -1,0 +1,13 @@
+export type Point = { x: number; y: number; pressure?: number };
+export type Segment = { op: 'M' | 'L'; x: number; y: number } | { op: 'Q'; cx: number; cy: number; x: number; y: number } | { op: 'C'; cx1: number; cy1: number; cx2: number; cy2: number; x: number; y: number } | { op: 'Z' };
+export type Matrix = [number, number, number, number, number, number];
+export type Geometry = { kind: 'stroke'; points: Point[] } | { kind: 'path'; segments: Segment[] } | { kind: 'text'; x: number; y: number; text: string; size: number };
+export type Style = { stroke: string; fill: string | null; width: number; opacity: number };
+export type Drawing = { geometry: Geometry; style?: Partial<Style>; transform?: Matrix };
+export type Mask = { points: Point[]; radius: number; transform: Matrix };
+export type Element = { id: string; version: number; order: number; author: string; drawing: Drawing & { style: Style; transform: Matrix }; masks: Mask[] };
+export type Snapshot = { version: number; sequence: number; width: number; height: number; elements: Element[]; canUndo: boolean; canRedo: boolean };
+export type Operation = { op: 'create'; id: string; drawing: Drawing } | { op: 'replace'; id: string; expectedVersion: number; drawing: Drawing } | { op: 'delete'; id: string; expectedVersion: number } | { op: 'erase'; targets: { id: string; expectedVersion: number }[]; points: Point[]; radius: number } | { op: 'clear'; expectedSequence: number } | { op: 'undo' | 'redo' };
+export type Command = { commandId: string; operations: Operation[] };
+export type Receipt = { commandId: string; sequence: number; affected: string[] };
+export type Acceptance = { journal: object; snapshot: Snapshot; receipt: Receipt; accepted: boolean };

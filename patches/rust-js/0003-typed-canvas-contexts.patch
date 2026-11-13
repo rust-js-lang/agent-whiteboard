@@ -1,0 +1,180 @@
+diff --git a/docs/guide/libraries/README.md b/docs/guide/libraries/README.md
+index c0b0cc3..5064a81 100644
+--- a/docs/guide/libraries/README.md
++++ b/docs/guide/libraries/README.md
+@@ -819,3 +819,11 @@ A JavaScript library from npm is another matter: its binding is a crate
+ of its own, written as [Write bindings](../interop/bindings.md) says, and
+ shared as an npm package ([ADR 0118](../../decisions/0118-bindings-on-npm-only.md)).
+ A crate from crates.io is [Crates from crates.io](crates-io.md).
++
++### Typed canvas contexts
++
++Use canvas.get_context(webapi::canvas_contexts::TwoD, None) to request a nullable
++CanvasRenderingContext2D directly. BitmapRenderer, WebGl, WebGl2 and WebGpu tokens
++likewise carry the browser's request/result relationship. Dynamic string names
++use the same method and retain its broad RenderingContext result. No instanceof
++check or application-side cast is needed. See [the decision](../../decisions/1137-typed-canvas-context-requests.md).
+diff --git a/test/webapi-bindings.test.ts b/test/webapi-bindings.test.ts
+index 4e7defa..873dff0 100644
+--- a/test/webapi-bindings.test.ts
++++ b/test/webapi-bindings.test.ts
+@@ -1450,3 +1450,33 @@ pub fn bare_scheduler() -> &'static Scheduler {
+   expect(lib.postTaskScheduler()).toBeUndefined();
+   expect(() => lib.bareScheduler()).toThrow(ReferenceError);
+ });
++
++// A literal context request already supplies the type; DOM constructor identity is irrelevant.
++test("canvas context requests preserve their typed nullable result across realms", () => {
++  const withWeb = ["--", "--extern", `webapi=${join(target, "libwebapi.rmeta")}`, "--extern", `js=${join(target, "libjs.rmeta")}`, "-L", target];
++  const dir = fixture("typed-canvas-context");
++  writeFileSync(join(dir, "lib.rs"), `use webapi::{canvas_contexts, CanvasRenderingContext2D, HTMLCanvasElement, RenderingContext, WebGL2RenderingContext};
++pub fn context(canvas: &HTMLCanvasElement) -> Option<&'static CanvasRenderingContext2D> {
++    canvas.get_context(canvas_contexts::TwoD, None)
++}
++pub fn webgl(canvas: &HTMLCanvasElement) -> Option<&'static WebGL2RenderingContext> {
++    canvas.get_context(canvas_contexts::WebGl2, None)
++}
++pub fn dynamic(canvas: &HTMLCanvasElement, name: &str) -> Option<RenderingContext<'static>> {
++    canvas.get_context(name, None)
++}
++`);
++  run([compiler, join(dir, "lib.rs"), "-o", join(dir, "lib.js"), ...withWeb]);
++  const generated = readFileSync(join(dir, "lib.js"), "utf8");
++  expect(generated).toContain('canvas.getContext("2d")');
++  expect(generated).toContain('canvas.getContext("webgl2")');
++  expect(generated).not.toContain("instanceof");
++  writeFileSync(join(dir, "run.js"), `import { context, webgl, dynamic } from "./lib.js";
++const foreignContext = { fillRect() {} };
++const canvas = { getContext(kind) { return kind === "2d" ? foreignContext : null; } };
++if (context(canvas) !== foreignContext) throw Error("context identity was lost");
++if (webgl(canvas) != null) throw Error("nullability was lost");
++if (dynamic(canvas, "2d") !== foreignContext) throw Error("dynamic context changed");
++`);
++  run(["bun", join(dir, "run.js")]);
++});
+diff --git a/webapi/generate.ts b/webapi/generate.ts
+index 9bbab06..9e5bacd 100644
+--- a/webapi/generate.ts
++++ b/webapi/generate.ts
+@@ -2132,6 +2132,18 @@ const TYPED: Record<string, string[]> = {
+   ],
+ };
+ 
++// Typed replacements preserve one public operation while refining its result.
++const TYPED_REPLACEMENTS: Record<string, Record<string, string>> = {
++  HTMLCanvasElement: {
++    getContext: typed([
++      "Request a context by its type, as TypeScript's literal overloads do.",
++      "canvas_contexts::TwoD returns CanvasRenderingContext2D; a string keeps RenderingContext.",
++      "The result remains nullable, and no cross-realm instanceof discrimination is needed.",
++    ], "getContext", "get_context<C: CanvasContext>(&self, context_id: C, options: Option<&dyn IntoUnknown>) -> Option<C::Output>")
++      .replace("    pub fn", "    #[cfg_attr(rust_js, rust_js::nullable)]\n    pub fn"),
++  },
++};
++
+ const out: string[] = [];
+ const line = (s = "") => out.push(s);
+ 
+@@ -2491,7 +2503,7 @@ for (const name of INTERFACES) {
+     // `&'static T` (rd574): each a class of the crate, `'static`.
+     line(listOf ? `impl<T: 'static> ${type}<T> {` : `impl ${type} {`);
+     for (const f of methods.map((f) => listing(i, f))) {
+-      line(generic({ ...f, params: ["&self", ...f.params.slice(1)] }));
++      line(TYPED_REPLACEMENTS[name]?.[f.jsName] ?? generic({ ...f, params: ["&self", ...f.params.slice(1)] }));
+       line();
+     }
+     for (const f of unionOf) {
+@@ -3002,6 +3014,8 @@ line(`pub trait Tag {`);
+ line(`    type Element;`);
+ line(`}`);
+ line();
++line("/// The requested canvas kind determines its result without inspecting DOM class identity.\npub trait CanvasContext { type Output; }\nimpl CanvasContext for &str { type Output = RenderingContext<'static>; }\nimpl CanvasContext for String { type Output = RenderingContext<'static>; }\nimpl CanvasContext for &String { type Output = RenderingContext<'static>; }\npub mod canvas_contexts {\n    /// The standard 2D context.\n    #[cfg_attr(rust_js, rust_js::name = \"2d\")]\n    #[derive(Clone, Copy)]\n    pub struct TwoD;\n    /// The image bitmap presentation context.\n    #[cfg_attr(rust_js, rust_js::name = \"bitmaprenderer\")]\n    #[derive(Clone, Copy)]\n    pub struct BitmapRenderer;\n    #[cfg_attr(rust_js, rust_js::name = \"webgl\")]\n    #[derive(Clone, Copy)]\n    pub struct WebGl;\n    #[cfg_attr(rust_js, rust_js::name = \"webgl2\")]\n    #[derive(Clone, Copy)]\n    pub struct WebGl2;\n    #[cfg_attr(rust_js, rust_js::name = \"webgpu\")]\n    #[derive(Clone, Copy)]\n    pub struct WebGpu;\n}\nimpl CanvasContext for canvas_contexts::TwoD { type Output = &'static CanvasRenderingContext2D; }\nimpl CanvasContext for canvas_contexts::BitmapRenderer { type Output = &'static ImageBitmapRenderingContext; }\nimpl CanvasContext for canvas_contexts::WebGl { type Output = &'static WebGLRenderingContext; }\nimpl CanvasContext for canvas_contexts::WebGl2 { type Output = &'static WebGL2RenderingContext; }\nimpl CanvasContext for canvas_contexts::WebGpu { type Output = &'static GPUCanvasContext; }\n");
++line();
+ line(`/// The SVG element a tag makes, as TypeScript's \`SVGElementTagNameMap\`: \`Circle\`'s is an \`SVGCircleElement\`.`);
+ line(`pub trait SVGTag {`);
+ line(`    type Element;`);
+diff --git a/webapi/src/lib.rs b/webapi/src/lib.rs
+index 1ab2f17..e5ee8a0 100644
+--- a/webapi/src/lib.rs
++++ b/webapi/src/lib.rs
+@@ -11591,10 +11591,12 @@ impl HTMLCanvasElement {
+         unreachable!()
+     }
+ 
+-    /// [MDN](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement/getContext)
++    /// Request a context by its type, as TypeScript's literal overloads do.
++    /// canvas_contexts::TwoD returns CanvasRenderingContext2D; a string keeps RenderingContext.
++    /// The result remains nullable, and no cross-realm instanceof discrimination is needed.
+     #[cfg_attr(rust_js, rust_js::link_name = "getContext")]
+     #[cfg_attr(rust_js, rust_js::nullable)]
+-    pub fn get_context(&self, context_id: &str, options: Option<&dyn IntoUnknown>) -> Option<RenderingContext<'static>> {
++    pub fn get_context<C: CanvasContext>(&self, context_id: C, options: Option<&dyn IntoUnknown>) -> Option<C::Output> {
+         unreachable!()
+     }
+ 
+@@ -104424,6 +104426,37 @@ pub trait Tag {
+     type Element;
+ }
+ 
++/// The requested canvas kind determines its result without inspecting DOM class identity.
++pub trait CanvasContext { type Output; }
++impl CanvasContext for &str { type Output = RenderingContext<'static>; }
++impl CanvasContext for String { type Output = RenderingContext<'static>; }
++impl CanvasContext for &String { type Output = RenderingContext<'static>; }
++pub mod canvas_contexts {
++    /// The standard 2D context.
++    #[cfg_attr(rust_js, rust_js::name = "2d")]
++    #[derive(Clone, Copy)]
++    pub struct TwoD;
++    /// The image bitmap presentation context.
++    #[cfg_attr(rust_js, rust_js::name = "bitmaprenderer")]
++    #[derive(Clone, Copy)]
++    pub struct BitmapRenderer;
++    #[cfg_attr(rust_js, rust_js::name = "webgl")]
++    #[derive(Clone, Copy)]
++    pub struct WebGl;
++    #[cfg_attr(rust_js, rust_js::name = "webgl2")]
++    #[derive(Clone, Copy)]
++    pub struct WebGl2;
++    #[cfg_attr(rust_js, rust_js::name = "webgpu")]
++    #[derive(Clone, Copy)]
++    pub struct WebGpu;
++}
++impl CanvasContext for canvas_contexts::TwoD { type Output = &'static CanvasRenderingContext2D; }
++impl CanvasContext for canvas_contexts::BitmapRenderer { type Output = &'static ImageBitmapRenderingContext; }
++impl CanvasContext for canvas_contexts::WebGl { type Output = &'static WebGLRenderingContext; }
++impl CanvasContext for canvas_contexts::WebGl2 { type Output = &'static WebGL2RenderingContext; }
++impl CanvasContext for canvas_contexts::WebGpu { type Output = &'static GPUCanvasContext; }
++
++
+ /// The SVG element a tag makes, as TypeScript's `SVGElementTagNameMap`: `Circle`'s is an `SVGCircleElement`.
+ pub trait SVGTag {
+     type Element;
+diff --git a/docs/decisions/1137-typed-canvas-context-requests.md b/docs/decisions/1137-typed-canvas-context-requests.md
+new file mode 100644
+index 0000000..bfc3c1e
+--- /dev/null
++++ b/docs/decisions/1137-typed-canvas-context-requests.md
+@@ -0,0 +1,22 @@
++# Typed canvas context requests
++
++Issue: #1698.
++
++HTMLCanvasElement.getContext returns a type determined by the requested context
++name. A broad RenderingContext union cannot safely be discriminated using DOM
++constructor identity across realms. Keep that refusal; express the missing fact
++in the binding instead.
++
++One generic get_context<C: CanvasContext> returns Option<C::Output>. Typed
++canvas_contexts tokens use the existing named unit-struct binding representation;
++dynamic string requests retain the original broad output through the same API.
++The WebIDL generator owns the override and emits the shipped declaration.
++
++Regression tests compile typed and dynamic calls, require direct getContext
++output without instanceof, and execute without DOM constructor globals while
++preserving context object identity and null results. A consumer uses the real
++Canvas 2D API in browser E2E tests.
++
++Rust/JS decision: no observable difference. The browser already guarantees the
++request/result relationship; no cast, approximation or second context registry
++is introduced. Rust checks which operations the returned context supports.
