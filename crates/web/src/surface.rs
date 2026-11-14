@@ -91,9 +91,18 @@ struct Replay {
     next: Snapshot,
     resolve: &'static dyn Fn(PlaybackResult),
 }
+struct Background {
+    sequence: u32,
+    map: Mapping,
+    width: f64,
+    height: f64,
+    hidden: Option<String>,
+    canvas: &'static HTMLCanvasElement,
+}
 pub struct Surface {
     pub canvas: &'static HTMLCanvasElement,
     renderer: Renderer,
+    background: RefCell<Option<Background>>,
     live: RefCell<Snapshot>,
     view: Cell<Viewport>,
     brush: RefCell<BrushSettings>,
@@ -120,6 +129,7 @@ impl Surface {
         let surface = Rc::new(Self {
             canvas,
             renderer: Renderer::default(),
+            background: RefCell::new(None),
             live: RefCell::new(Journal::default().snapshot("initial")),
             view: Cell::new(view),
             brush: RefCell::new(BrushSettings {
@@ -226,23 +236,25 @@ impl Surface {
             .set_height((self.canvas.client_height().max(1.0) * ratio).round());
         self.paint();
     }
+    pub fn fonts_changed(&self) {
+        self.background.borrow_mut().take();
+        self.paint();
+    }
     pub fn paint(&self) {
         let shown = self.shown.borrow().clone();
         let replaying = shown.is_some();
-        let snapshot = shown.unwrap_or_else(|| self.live.borrow().clone());
-        if let Err(error) = self.paint_snapshot(&snapshot, replaying) {
+        let result = if let Some(snapshot) = shown {
+            self.paint_snapshot(&snapshot, replaying)
+        } else {
+            self.paint_snapshot(&self.live.borrow(), false)
+        };
+        if let Err(error) = result {
             self.set_problem.set(Some(error));
         }
     }
     fn paint_snapshot(&self, snapshot: &Snapshot, replaying: bool) -> Result<(), String> {
         if replaying {
             *self.shown.borrow_mut() = Some(snapshot.clone());
-        }
-        let mut visible = snapshot.clone();
-        if !replaying && let Some(draft) = self.draft.borrow().as_ref() {
-            visible.elements.retain(|element| element.id != draft.id);
-            visible.elements.push(draft.clone());
-            visible.elements.sort_by_key(|element| element.order);
         }
         let map = self.map();
         let ratio = window.device_pixel_ratio().min(2.0);
@@ -251,10 +263,90 @@ impl Surface {
             x: map.x * ratio,
             y: map.y * ratio,
         };
-        self.renderer.paint(self.canvas, &visible, physical, true)?;
+        let draft = self.draft.borrow();
+        let draft_index = draft.as_ref().and_then(|draft| {
+            snapshot
+                .elements
+                .iter()
+                .position(|element| element.id == draft.id)
+        });
+        if replaying {
+            self.renderer
+                .paint(self.canvas, &snapshot.elements, physical, true)?;
+        } else {
+            let hidden = draft_index.map(|index| snapshot.elements[index].id.clone());
+            let mut cached = self.background.borrow_mut();
+            let valid = cached.as_ref().is_some_and(|background| {
+                background.sequence == snapshot.sequence
+                    && background.map == physical
+                    && background.width == self.canvas.width()
+                    && background.height == self.canvas.height()
+                    && background.hidden == hidden
+            });
+            if !valid {
+                let canvas = cached
+                    .as_ref()
+                    .map(|background| background.canvas)
+                    .unwrap_or_else(|| {
+                        render::new_canvas(self.canvas.width(), self.canvas.height())
+                    });
+                if canvas.width() != self.canvas.width() {
+                    canvas.set_width(self.canvas.width());
+                }
+                if canvas.height() != self.canvas.height() {
+                    canvas.set_height(self.canvas.height());
+                }
+                self.renderer.paint(
+                    canvas,
+                    draft_index
+                        .map(|index| &snapshot.elements[..index])
+                        .unwrap_or(&snapshot.elements),
+                    physical,
+                    true,
+                )?;
+                *cached = Some(Background {
+                    sequence: snapshot.sequence,
+                    map: physical,
+                    width: self.canvas.width(),
+                    height: self.canvas.height(),
+                    hidden,
+                    canvas,
+                });
+            }
+            let ctx = render::context(self.canvas)?;
+            ctx.reset_transform();
+            ctx.set_global_alpha(1.0);
+            ctx.set_global_composite_operation("source-over");
+            ctx.draw_image(
+                cached.as_ref().expect("painted background").canvas,
+                0.0,
+                0.0,
+                None,
+                None,
+            );
+            if let Some(draft) = draft.as_ref() {
+                self.renderer.paint_element(self.canvas, draft, physical)?;
+            }
+            // An existing mark keeps its layer order during a drag. Cache only
+            // the finished prefix, then draw the moving mark and its foreground.
+            if let Some(index) = draft_index {
+                for element in &snapshot.elements[index + 1..] {
+                    self.renderer
+                        .paint_element(self.canvas, element, physical)?;
+                }
+            }
+        }
         if !replaying
             && let Some(selected) = self.selected.borrow().as_ref()
-            && let Some(element) = visible.elements.iter().find(|e| &e.id == selected)
+            && let Some(element) = draft
+                .as_ref()
+                .filter(|element| &element.id == selected)
+                .or_else(|| {
+                    snapshot
+                        .elements
+                        .iter()
+                        .find(|element| &element.id == selected)
+                })
         {
             let bounds = render::bounds(element);
             let ctx = render::context(self.canvas)?;
@@ -284,8 +376,20 @@ impl Surface {
             "data-live-sequence",
             self.live.borrow().sequence.to_string(),
         );
-        self.canvas
-            .set_attribute("data-element-count", visible.elements.len().to_string());
+        self.canvas.set_attribute(
+            "data-element-count",
+            (snapshot.elements.len()
+                + usize::from(
+                    !replaying
+                        && draft.as_ref().is_some_and(|draft| {
+                            !snapshot
+                                .elements
+                                .iter()
+                                .any(|element| element.id == draft.id)
+                        }),
+                ))
+            .to_string(),
+        );
         self.canvas
             .set_attribute("data-playback", if replaying { "replay" } else { "live" });
         Ok(())

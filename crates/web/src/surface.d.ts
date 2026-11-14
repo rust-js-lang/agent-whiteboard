@@ -2,7 +2,16 @@
 
 import type { Drawing, Element, Journal, Operation, Point, Snapshot } from "../../board-core/src/lib.js";
 import type { Brush, Clip } from "../../board-core/src/painting.js";
-import type { Renderer, Viewport } from "./render.js";
+import type { Mapping, Renderer, Viewport } from "./render.js";
+
+interface Background {
+    sequence: number;
+    map: Mapping;
+    width: number;
+    height: number;
+    hidden?: string | undefined;
+    canvas: HTMLCanvasElement;
+}
 
 interface Pointer {
     id: number;
@@ -55,6 +64,7 @@ export interface PlaybackResult {
 export interface Surface {
     canvas: HTMLCanvasElement;
     renderer: Renderer;
+    background?: Background | undefined;
     live: Snapshot;
     view: Viewport;
     brush: BrushSettings;
@@ -80,6 +90,7 @@ export const Surface: {
     viewport(surface: Surface): Viewport;
     world(surface: Surface, x: number, y: number): Point;
     resize(surface: Surface): void;
+    fontsChanged(surface: Surface): void;
     paint(surface: Surface): void;
     clearDraft(surface: Surface): void;
     cancelPointer(surface: Surface): void;

@@ -205,7 +205,7 @@ export function App() {
       canvas$1.addEventListener("wheel", wheel, options);
       (async () => {
         await $settle(document.fonts.ready);
-        Surface.paint(drawing);
+        Surface.fontsChanged(drawing);
       })();
       function hidden() {
         if (document.hidden) {

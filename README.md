@@ -112,3 +112,5 @@ Playwright exercises the built app through real WebMCP, mouse, touch, IndexedDB,
 offline loading, and separate authenticated server clients. [TESTS.md](TESTS.md)
 records coverage. GitHub Actions only builds and deploys Pages; tests run locally.
 Actions are pinned to full commit hashes.
+
+Rendering performance and the measured before/after comparison are documented in [docs/performance.md](docs/performance.md).

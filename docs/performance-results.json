@@ -1,0 +1,250 @@
+{
+  "date": "2026-11-14",
+  "baselineCommit": "bb0a099",
+  "before": {
+    "elements": 847,
+    "loadMs": 2453.291333,
+    "browser": "158.0.8127.18",
+    "viewport": {
+      "width": 1300,
+      "height": 1000,
+      "deviceScaleFactor": 2
+    },
+    "fixtureSha256": "8f2c2c490311820e22cfecf8b4c09e3dac34fa3bc70935dab2edba88a26e6747",
+    "idle": {
+      "wallMs": 2024.9515830000005,
+      "scriptMs": 0.217,
+      "taskMs": 58.388,
+      "heapMiB": 25.014820098876953,
+      "paths": 0,
+      "resizes": 0,
+      "composites": 0,
+      "frames": 0,
+      "longTasks": []
+    },
+    "pan": {
+      "wallMs": 6412.129625,
+      "scriptMs": 6387.405,
+      "taskMs": 6426.209999999999,
+      "heapMiB": 10.874614715576172,
+      "paths": 2520,
+      "resizes": 4464,
+      "composites": 2229,
+      "frames": 0,
+      "longTasks": [
+        2197,
+        2063,
+        2126
+      ]
+    },
+    "draw": {
+      "wallMs": 22389.087874999997,
+      "scriptMs": 17656.177,
+      "taskMs": 22356.166,
+      "heapMiB": 30.905521392822266,
+      "paths": 8407,
+      "resizes": 14880,
+      "composites": 7430,
+      "frames": 1,
+      "longTasks": [
+        2124,
+        2232,
+        2261,
+        2147,
+        2268,
+        2224,
+        2282,
+        2129,
+        130,
+        2262,
+        2232
+      ]
+    },
+    "replay": {
+      "wallMs": 8557.730875000001,
+      "scriptMs": 7948.682999999999,
+      "taskMs": 8119.044000000003,
+      "heapMiB": 14.966289520263672,
+      "paths": 2610,
+      "resizes": 5310,
+      "composites": 2638,
+      "frames": 47,
+      "longTasks": [
+        62,
+        82,
+        87,
+        103,
+        187,
+        739,
+        2343,
+        4255
+      ]
+    },
+    "retainedHeapMiB": 11.761528015136719
+  },
+  "after": {
+    "elements": 847,
+    "loadMs": 338.840959,
+    "browser": "158.0.8127.18",
+    "viewport": {
+      "width": 1300,
+      "height": 1000,
+      "deviceScaleFactor": 2
+    },
+    "fixtureSha256": "8f2c2c490311820e22cfecf8b4c09e3dac34fa3bc70935dab2edba88a26e6747",
+    "idle": {
+      "wallMs": 2001.8913750000002,
+      "scriptMs": 0.231,
+      "taskMs": 65.256,
+      "heapMiB": 23.472881317138672,
+      "paths": 0,
+      "resizes": 0,
+      "composites": 0,
+      "frames": 0,
+      "longTasks": []
+    },
+    "pan": {
+      "wallMs": 178.7609169999996,
+      "scriptMs": 163.676,
+      "taskMs": 206.75799999999998,
+      "heapMiB": 31.135250091552734,
+      "paths": 0,
+      "resizes": 2859,
+      "composites": 2975,
+      "frames": 0,
+      "longTasks": [
+        82,
+        80
+      ]
+    },
+    "draw": {
+      "wallMs": 385.35283400000026,
+      "scriptMs": 8.048,
+      "taskMs": 319.22499999999997,
+      "heapMiB": 32.1774787902832,
+      "paths": 9,
+      "resizes": 1431,
+      "composites": 1496,
+      "frames": 1,
+      "longTasks": [
+        126,
+        87
+      ]
+    },
+    "replay": {
+      "wallMs": 2169.221042,
+      "scriptMs": 1385.661,
+      "taskMs": 1699.7640000000001,
+      "heapMiB": 40.89463424682617,
+      "paths": 1287,
+      "resizes": 21923,
+      "composites": 22813,
+      "frames": 80,
+      "longTasks": [
+        51,
+        57,
+        58,
+        71,
+        84,
+        124
+      ]
+    },
+    "retainedHeapMiB": 12.347248077392578
+  },
+  "pixels": {
+    "control": [
+      {
+        "index": 0,
+        "pixels": 1045800,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 1,
+        "pixels": 620550,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 2,
+        "pixels": 1029000,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 3,
+        "pixels": 4269200,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 4,
+        "pixels": 4269200,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      }
+    ],
+    "after": [
+      {
+        "index": 0,
+        "pixels": 1045800,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 1,
+        "pixels": 620550,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 2,
+        "pixels": 1029000,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 3,
+        "pixels": 4269200,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      },
+      {
+        "index": 4,
+        "pixels": 4269200,
+        "changed": 0,
+        "beyondOne": 0,
+        "beyondTwo": 0,
+        "max": 0,
+        "mean": 0
+      }
+    ]
+  }
+}

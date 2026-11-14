@@ -2,7 +2,6 @@
 
 /** Browser drawing uses the canonical paths produced by board-core. */
 import {
-  drawingSerialize_serialize,
   inverse,
   maskData,
   pathData,
@@ -10,24 +9,29 @@ import {
 } from "../../board-core/src/lib.js";
 import { Gradient, inkLayers } from "../../board-core/src/painting.js";
 import {
+  $borrowMut,
   $byteLen,
+  $collectResults,
   $debugParseError,
   $displayF64,
-  $displayJsonError,
+  $eq,
   $f64Max,
   $f64Min,
+  $fieldCell,
   $floatEuclid,
   $json,
   $lines,
   $live,
   $max,
   $parseInt,
+  $retainMap,
   $round,
   $settle,
   $strSlice,
-  $toJson,
   $try,
+  $unborrow,
   $unwindsOn,
+  $unwrap,
   $unwrapOk,
 } from "@rust-js/std";
 
@@ -131,60 +135,160 @@ function transform(ctx, matrix) {
   ctx.transform(a, b, c, d, e, f);
 }
 
-export const Renderer = {
-  path(renderer, drawing) {
-    const result = $toJson(drawing, drawingSerialize_serialize, false);
-    const result$1 =
-      result.TAG === "Err" ? { TAG: "Err", _0: $displayJsonError(result._0) } : result;
-    if (result$1.TAG === "Err") {
-      return result$1;
+const Prepared = {
+  new(element) {
+    const drawing = element.drawing;
+    const props = { ...drawing };
+    const geometry =
+      drawing.geometry.TAG === "Stroke"
+        ? { ...drawing.geometry, points: drawing.geometry.points.map((item) => ({ ...item })) }
+        : drawing.geometry.TAG === "Path"
+          ? {
+              ...drawing.geometry,
+              segments: drawing.geometry.segments.map((item) =>
+                item.TAG === "M"
+                  ? { ...item }
+                  : item.TAG === "L"
+                    ? { ...item }
+                    : item.TAG === "Q"
+                      ? { ...item }
+                      : item.TAG === "C"
+                        ? { ...item }
+                        : item,
+              ),
+            }
+          : drawing.geometry.TAG === "Text"
+            ? { ...drawing.geometry }
+            : drawing.geometry;
+    const clip =
+      drawing.clip == null
+        ? drawing.clip
+        : {
+            ...drawing.clip,
+            segments: drawing.clip.segments.map((item) =>
+              item.TAG === "M"
+                ? { ...item }
+                : item.TAG === "L"
+                  ? { ...item }
+                  : item.TAG === "Q"
+                    ? { ...item }
+                    : item.TAG === "C"
+                      ? { ...item }
+                      : item,
+            ),
+            transform: drawing.clip.transform.slice(),
+          };
+    const props$1 = { ...drawing.style };
+    const stroke =
+      drawing.style.stroke.TAG === "Color"
+        ? { ...drawing.style.stroke }
+        : drawing.style.stroke.TAG === "Gradient"
+          ? {
+              ...drawing.style.stroke,
+              _0:
+                drawing.style.stroke._0.TAG === "Linear"
+                  ? {
+                      ...drawing.style.stroke._0,
+                      stops: drawing.style.stroke._0.stops.map((item) => ({ ...item })),
+                    }
+                  : drawing.style.stroke._0.TAG === "Radial"
+                    ? {
+                        ...drawing.style.stroke._0,
+                        stops: drawing.style.stroke._0.stops.map((item) => ({ ...item })),
+                      }
+                    : drawing.style.stroke._0,
+            }
+          : drawing.style.stroke;
+    const fill =
+      drawing.style.fill == null
+        ? drawing.style.fill
+        : drawing.style.fill.TAG === "Color"
+          ? { ...drawing.style.fill }
+          : drawing.style.fill.TAG === "Gradient"
+            ? {
+                ...drawing.style.fill,
+                _0:
+                  drawing.style.fill._0.TAG === "Linear"
+                    ? {
+                        ...drawing.style.fill._0,
+                        stops: drawing.style.fill._0.stops.map((item) => ({ ...item })),
+                      }
+                    : drawing.style.fill._0.TAG === "Radial"
+                      ? {
+                          ...drawing.style.fill._0,
+                          stops: drawing.style.fill._0.stops.map((item) => ({ ...item })),
+                        }
+                      : drawing.style.fill._0,
+              }
+            : drawing.style.fill;
+    const brush =
+      drawing.style.brush.TAG === "Soft"
+        ? { ...drawing.style.brush }
+        : drawing.style.brush.TAG === "Textured"
+          ? { ...drawing.style.brush }
+          : drawing.style.brush;
+    const transform = drawing.transform.slice();
+    const value = element.masks.map((item) => ({
+      ...item,
+      points: item.points.map((item) => ({ ...item })),
+      transform: item.transform.slice(),
+    }));
+    let path2D;
+    if (drawing.geometry.TAG === "Path") {
+      const result = pathData(drawing);
+      if (result.TAG === "Err") {
+        return result;
+      }
+      path2D = new Path2D(result._0);
+    } else {
+      path2D = undefined;
     }
-    const key = result$1._0;
-    const found = renderer.paths.get(key);
-    if (found != null) {
-      return { TAG: "Ok", _0: found };
+    let collect;
+    if (drawing.geometry.TAG === "Stroke") {
+      const result = inkLayers(drawing);
+      if (result.TAG === "Err") {
+        return result;
+      }
+      collect = result._0.map((layer) => [new Path2D(layer.path), layer.opacity]);
+    } else {
+      collect = [];
     }
-    const result$2 = pathData(drawing);
-    if (result$2.TAG === "Err") {
-      return result$2;
-    }
-    const data = result$2._0;
-    const path = new Path2D(data);
-    const cache = renderer.paths;
-    if (cache.size >= 500) {
-      cache.clear();
-    }
-    cache.set(key, path);
-    return { TAG: "Ok", _0: path };
-  },
-  ink(renderer, drawing) {
-    const result = $toJson(drawing, drawingSerialize_serialize, false);
-    const result$1 =
-      result.TAG === "Err" ? { TAG: "Err", _0: $displayJsonError(result._0) } : result;
-    if (result$1.TAG === "Err") {
-      return result$1;
-    }
-    const key = result$1._0;
-    let paths = renderer.ink.get(key);
-    if (paths != null) {
-      return { TAG: "Ok", _0: paths.map((item) => [item[0], item[1]]) };
-    }
-    const result$2 = inkLayers(drawing);
-    if (result$2.TAG === "Err") {
-      return result$2;
-    }
-    paths = result$2._0.map((layer) => [new Path2D(layer.path), layer.opacity]);
-    const cache = renderer.ink;
-    if (cache.size >= 500) {
-      cache.clear();
-    }
-    cache.set(
-      key,
-      paths.map((item) => [item[0], item[1]]),
+    const map = drawing.clip != null ? new Path2D(segmentData(drawing.clip.segments)) : undefined;
+    const result = $collectResults(
+      element.masks.values().map((mask) => {
+        const result = maskData(mask);
+        if (result.TAG === "Err") {
+          return result;
+        }
+        return { TAG: "Ok", _0: [new Path2D(result._0), mask.transform.slice()] };
+      }),
     );
-    return { TAG: "Ok", _0: paths };
+    if (result.TAG === "Err") {
+      return result;
+    }
+    return {
+      TAG: "Ok",
+      _0: {
+        drawing: {
+          ...props,
+          geometry,
+          clip,
+          style: { ...props$1, stroke, fill, brush },
+          transform,
+        },
+        masks: value,
+        path: path2D,
+        ink: collect,
+        clip: map,
+        erasers: result._0,
+        bounds: bounds(element),
+      },
+    };
   },
-  geometry(renderer, ctx, element) {
+};
+
+export const Renderer = {
+  geometry(ctx, element, prepared) {
     const drawing = element.drawing;
     const style = drawing.style;
     transform(ctx, drawing.transform.slice());
@@ -193,28 +297,20 @@ export const Renderer = {
     ctx.lineWidth = style.width;
     if (drawing.clip != null) {
       transform(ctx, drawing.clip.transform.slice());
-      ctx.clip(new Path2D(segmentData(drawing.clip.segments)), "nonzero");
+      ctx.clip($unwrap(prepared.clip, "prepared clip"), "nonzero");
       transform(ctx, inverse(drawing.clip.transform.slice()));
     }
     setPaint(ctx, style.stroke, true);
     setPaint(ctx, style.fill ?? style.stroke, false);
     if (drawing.geometry.TAG === "Stroke") {
       setPaint(ctx, style.stroke, false);
-      const result = Renderer.ink(renderer, drawing);
-      if (result.TAG === "Err") {
-        return result;
-      }
-      for (const [path, opacity] of result._0) {
+      for (const [path, opacity] of prepared.ink) {
         ctx.globalAlpha = opacity;
         ctx.fill(path, "nonzero");
       }
       ctx.globalAlpha = 1;
     } else if (drawing.geometry.TAG === "Path") {
-      const result$1 = Renderer.path(renderer, drawing);
-      if (result$1.TAG === "Err") {
-        return result$1;
-      }
-      const path = result$1._0;
+      const path = $unwrap(prepared.path, "prepared path");
       if (style.fill != null) {
         ctx.fill(path, "nonzero");
       }
@@ -231,28 +327,23 @@ export const Renderer = {
         );
       }
     }
-    for (const mask of element.masks) {
-      const result$1 = maskData(mask);
-      if (result$1.TAG === "Err") {
-        return result$1;
-      }
-      const data = result$1._0;
+    for (const [path, matrix] of prepared.erasers) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
       ctx.globalAlpha = 1;
-      transform(ctx, mask.transform.slice());
+      transform(ctx, matrix.slice());
       ctx.fillStyle = "#000000";
-      ctx.fill(new Path2D(data), "nonzero");
+      ctx.fill(path, "nonzero");
       ctx.restore();
     }
     return { TAG: "Ok" };
   },
-  paint(renderer, canvas, snapshot, map, grid) {
-    const result$1 = context(canvas);
-    if (result$1.TAG === "Err") {
-      return result$1;
+  paint(renderer, canvas, elements, map, grid) {
+    const result = context(canvas);
+    if (result.TAG === "Err") {
+      return result;
     }
-    const ctx = result$1._0;
+    const ctx = result._0;
     const width = canvas.width;
     const height = canvas.height;
     ctx.resetTransform();
@@ -272,43 +363,154 @@ export const Renderer = {
         }
       }
     }
-    let layer;
-    for (const element of snapshot.elements) {
-      const isolated =
-        element.masks.length !== 0 ||
-        element.drawing.style.opacity < 1 ||
-        element.drawing.style.brush !== "Marker";
-      let destination;
-      if (isolated) {
-        layer ??= newCanvas(width, height);
-        const surface = layer;
-        surface.width = width;
-        surface.height = height;
-        const result$1 = context(surface);
-        if (result$1.TAG === "Err") {
-          return result$1;
-        }
-        destination = result$1._0;
-      } else {
-        destination = ctx;
-      }
-      destination.save();
-      applyMapping(destination, map);
-      const result$2 = Renderer.geometry(renderer, destination, element);
-      if (result$2.TAG === "Err") {
-        return result$2;
-      }
-      destination.restore();
-      if (isolated && layer != null) {
-        const surface = layer;
-        ctx.save();
-        ctx.resetTransform();
-        ctx.globalAlpha = element.drawing.style.opacity;
-        ctx.drawImage(surface, 0, 0);
-        ctx.restore();
+    const ids = new Set(elements.values().map((element) => element.id));
+    const borrowMut = $borrowMut(renderer.prepared);
+    $retainMap(borrowMut, (id) => ids.has(id), borrowMut, false);
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
+      const result = Renderer.paintElement(renderer, canvas, element, map);
+      if (result.TAG === "Err") {
+        return result;
       }
     }
     return { TAG: "Ok" };
+  },
+  paintElement(renderer, canvas, element, map) {
+    const cache = $borrowMut(renderer.prepared, true);
+    let result;
+    try {
+      const get = cache.get(element.id);
+      bb170: {
+        if (get == null || !$eq(get.drawing, element.drawing) || !$eq(get.masks, element.masks)) {
+          const result$1 = Prepared.new(element);
+          if (result$1.TAG !== "Err") {
+            cache.set(element.id, result$1._0);
+          } else {
+            result = result$1;
+            break bb170;
+          }
+        }
+        const prepared = $unwrap(cache.get(element.id), "prepared drawing");
+        const result$1 = context(canvas);
+        if (result$1.TAG !== "Err") {
+          const ctx = result$1._0;
+          const isolated =
+            element.masks.length !== 0 ||
+            element.drawing.style.opacity < 1 ||
+            element.drawing.style.brush !== "Marker";
+          if (!isolated) {
+            ctx.save();
+            applyMapping(ctx, map);
+            const result$1 = Renderer.geometry(ctx, element, prepared);
+            if (result$1.TAG !== "Err") {
+              ctx.restore();
+              result = { TAG: "Ok" };
+            } else {
+              result = result$1;
+            }
+          } else {
+            // Keep the surface origin and mapping unchanged for pixel-identical
+            // rasterization. Clear and composite only the mark's affected rectangle;
+            // pixels left elsewhere in the scratch surface are never copied.
+            // Text uses the full viewport because its extents depend on the font.
+            const b = prepared.bounds;
+            let left;
+            let top;
+            let right;
+            let bottom;
+            if (element.drawing.geometry.TAG === "Text") {
+              left = 0;
+              top = 0;
+              right = canvas.width;
+              bottom = canvas.height;
+            } else {
+              left = $f64Max(Math.floor(b.x * map.scale + map.x - 2), 0);
+              top = $f64Max(Math.floor(b.y * map.scale + map.y - 2), 0);
+              right = $f64Min(Math.ceil((b.x + b.width) * map.scale + map.x + 2), canvas.width);
+              bottom = $f64Min(Math.ceil((b.y + b.height) * map.scale + map.y + 2), canvas.height);
+            }
+            if (!(right <= left) && !(bottom <= top)) {
+              const layer = $borrowMut($fieldCell(renderer, "layer"), true);
+              try {
+                layer.value ??= newCanvas(canvas.width, canvas.height);
+                const surface = layer.value;
+                if (surface.width !== canvas.width) {
+                  surface.width = canvas.width;
+                }
+                if (surface.height !== canvas.height) {
+                  surface.height = canvas.height;
+                }
+                const result$1 = context(surface);
+                if (result$1.TAG !== "Err") {
+                  const destination = result$1._0;
+                  destination.resetTransform();
+                  destination.clearRect(left, top, right - left, bottom - top);
+                  destination.save();
+                  applyMapping(destination, map);
+                  const result$2 = Renderer.geometry(destination, element, prepared);
+                  if (result$2.TAG !== "Err") {
+                    destination.restore();
+                    // Copy the affected pixels at full opacity first. Applying opacity to a
+                    // source-rectangle draw can change browser color rounding; the final
+                    // full-image draw below retains the original compositing operation.
+                    const patch = $borrowMut($fieldCell(renderer, "patch"), true);
+                    try {
+                      patch.value ??= newCanvas(right - left, bottom - top);
+                      const patch$1 = patch.value;
+                      if (patch$1.width !== right - left) {
+                        patch$1.width = right - left;
+                      }
+                      if (patch$1.height !== bottom - top) {
+                        patch$1.height = bottom - top;
+                      }
+                      const result$1 = context(patch$1);
+                      if (result$1.TAG !== "Err") {
+                        const cropped = result$1._0;
+                        cropped.globalCompositeOperation = "copy";
+                        cropped.imageSmoothingEnabled = false;
+                        cropped.drawImage(
+                          surface,
+                          left,
+                          top,
+                          right - left,
+                          bottom - top,
+                          0,
+                          0,
+                          right - left,
+                          bottom - top,
+                        );
+                        ctx.save();
+                        ctx.resetTransform();
+                        ctx.globalAlpha = element.drawing.style.opacity;
+                        ctx.drawImage(patch$1, left, top);
+                        ctx.restore();
+                        return { TAG: "Ok" };
+                      }
+                      result = result$1;
+                    } finally {
+                      $unborrow(patch);
+                    }
+                  } else {
+                    result = result$2;
+                  }
+                } else {
+                  result = result$1;
+                }
+              } finally {
+                $unborrow(layer);
+              }
+            } else {
+              result = { TAG: "Ok" };
+            }
+          }
+        } else {
+          result = result$1;
+        }
+      }
+    } finally {
+      $unborrow(cache);
+    }
+    return result;
   },
 };
 export function captureInfoSerialize_serialize(captureInfo, json) {
@@ -350,9 +552,9 @@ export async function capture(snapshot, bounds, maxSize) {
   const scale = $f64Min(max / region.width, max / region.height);
   const canvas = newCanvas(region.width * scale, region.height * scale);
   const result = Renderer.paint(
-    { paths: new Map(), ink: new Map() },
+    { prepared: new Map() },
     canvas,
-    snapshot,
+    snapshot.elements,
     {
       scale,
       x: -region.x * scale,
@@ -440,12 +642,14 @@ export function bounds(element) {
   const maxX = transformed.map((p) => p[0]).reduce($f64Max, -Infinity);
   const minY = transformed.map((p) => p[1]).reduce($f64Min, Infinity);
   const maxY = transformed.map((p) => p[1]).reduce($f64Max, -Infinity);
-  const pad = element.drawing.style.width;
+  // Affine scale/shear also scales stroke width. Use conservative row norms.
+  const padX = element.drawing.style.width * Math.hypot(a, c);
+  const padY = element.drawing.style.width * Math.hypot(b, d);
   return {
-    x: minX - pad,
-    y: minY - pad,
-    width: maxX - minX + pad * 2,
-    height: maxY - minY + pad * 2,
+    x: minX - padX,
+    y: minY - padY,
+    width: maxX - minX + padX * 2,
+    height: maxY - minY + padY * 2,
   };
 }
 export function hit(snapshot, point, tolerance) {

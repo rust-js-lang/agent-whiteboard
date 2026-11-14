@@ -225,6 +225,11 @@ only after measuring concrete bottlenecks. Decorative draw-on playback can be
 added later; direct tool batches should paint promptly and should not serialize
 unrelated agents behind long animations.
 
+The current renderer retains prepared geometry and a finished-scene raster cache,
+with bounded compositing regions and preserved preview layer order. See
+[the measured renderer profile](performance.md) for its cache invalidation rules,
+exact pixel comparison, performance results and remaining limits.
+
 ## Commands and persistence
 
 A mutation contains protocol version, board ID, command ID and typed operations.

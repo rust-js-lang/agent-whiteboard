@@ -13,16 +13,19 @@ import {
   $clampFloat,
   $cmp,
   $debugF64,
+  $eq,
   $f64Max,
   $f64Min,
   $f64ToInt,
   $fieldCell,
   $index,
   $iter,
-  $retain,
+  $position,
   $round,
+  $slice,
   $truncate,
   $unborrow,
+  $unwrap,
   $unwrapOk,
   iterator_take,
 } from "@rust-js/std";
@@ -70,7 +73,8 @@ export const Surface = {
     }
     const surface = {
       canvas,
-      renderer: { paths: new Map(), ink: new Map() },
+      renderer: { prepared: new Map() },
+      background: undefined,
       live: Journal.snapshot(journalDefault.default(), "initial"),
       view,
       brush: {
@@ -185,16 +189,21 @@ export const Surface = {
     surface.canvas.height = $round($f64Max(surface.canvas.clientHeight, 1) * ratio);
     Surface.paint(surface);
   },
+  fontsChanged(surface) {
+    const borrowMut = $borrowMut($fieldCell(surface, "background"));
+    borrowMut.value = undefined;
+    Surface.paint(surface);
+  },
   paint(surface) {
-    const value = $borrow($fieldCell(surface, "shown"), true);
+    const borrow = $borrow($fieldCell(surface, "shown"), true);
     let shown;
     try {
       shown =
-        value.value == null
-          ? value.value
+        borrow.value == null
+          ? borrow.value
           : {
-              ...value.value,
-              elements: value.value.elements.map((item) => ({
+              ...borrow.value,
+              elements: borrow.value.elements.map((item) => ({
                 ...item,
                 drawing: {
                   ...item.drawing,
@@ -309,136 +318,22 @@ export const Surface = {
               })),
             };
     } finally {
-      $unborrow(value);
+      $unborrow(borrow);
     }
     const replaying = shown != null;
-    function fallback() {
-      const borrow = $borrow(surface.live, true);
-      const props = { ...borrow };
-      let elements;
+    let result;
+    if (shown != null) {
+      result = Surface.paintSnapshot(surface, shown, replaying);
+    } else {
+      const value = $borrow(surface.live, true);
       try {
-        elements = borrow.elements.map((item) => ({
-          ...item,
-          drawing: {
-            ...item.drawing,
-            geometry:
-              item.drawing.geometry.TAG === "Stroke"
-                ? {
-                    ...item.drawing.geometry,
-                    points: item.drawing.geometry.points.map((item) => ({ ...item })),
-                  }
-                : item.drawing.geometry.TAG === "Path"
-                  ? {
-                      ...item.drawing.geometry,
-                      segments: item.drawing.geometry.segments.map((item) =>
-                        item.TAG === "M"
-                          ? { ...item }
-                          : item.TAG === "L"
-                            ? { ...item }
-                            : item.TAG === "Q"
-                              ? { ...item }
-                              : item.TAG === "C"
-                                ? { ...item }
-                                : item,
-                      ),
-                    }
-                  : item.drawing.geometry.TAG === "Text"
-                    ? { ...item.drawing.geometry }
-                    : item.drawing.geometry,
-            clip:
-              item.drawing.clip == null
-                ? item.drawing.clip
-                : {
-                    ...item.drawing.clip,
-                    segments: item.drawing.clip.segments.map((item) =>
-                      item.TAG === "M"
-                        ? { ...item }
-                        : item.TAG === "L"
-                          ? { ...item }
-                          : item.TAG === "Q"
-                            ? { ...item }
-                            : item.TAG === "C"
-                              ? { ...item }
-                              : item,
-                    ),
-                    transform: item.drawing.clip.transform.slice(),
-                  },
-            style: {
-              ...item.drawing.style,
-              stroke:
-                item.drawing.style.stroke.TAG === "Color"
-                  ? { ...item.drawing.style.stroke }
-                  : item.drawing.style.stroke.TAG === "Gradient"
-                    ? {
-                        ...item.drawing.style.stroke,
-                        _0:
-                          item.drawing.style.stroke._0.TAG === "Linear"
-                            ? {
-                                ...item.drawing.style.stroke._0,
-                                stops: item.drawing.style.stroke._0.stops.map((item) => ({
-                                  ...item,
-                                })),
-                              }
-                            : item.drawing.style.stroke._0.TAG === "Radial"
-                              ? {
-                                  ...item.drawing.style.stroke._0,
-                                  stops: item.drawing.style.stroke._0.stops.map((item) => ({
-                                    ...item,
-                                  })),
-                                }
-                              : item.drawing.style.stroke._0,
-                      }
-                    : item.drawing.style.stroke,
-              fill:
-                item.drawing.style.fill == null
-                  ? item.drawing.style.fill
-                  : item.drawing.style.fill.TAG === "Color"
-                    ? { ...item.drawing.style.fill }
-                    : item.drawing.style.fill.TAG === "Gradient"
-                      ? {
-                          ...item.drawing.style.fill,
-                          _0:
-                            item.drawing.style.fill._0.TAG === "Linear"
-                              ? {
-                                  ...item.drawing.style.fill._0,
-                                  stops: item.drawing.style.fill._0.stops.map((item) => ({
-                                    ...item,
-                                  })),
-                                }
-                              : item.drawing.style.fill._0.TAG === "Radial"
-                                ? {
-                                    ...item.drawing.style.fill._0,
-                                    stops: item.drawing.style.fill._0.stops.map((item) => ({
-                                      ...item,
-                                    })),
-                                  }
-                                : item.drawing.style.fill._0,
-                        }
-                      : item.drawing.style.fill,
-              brush:
-                item.drawing.style.brush.TAG === "Soft"
-                  ? { ...item.drawing.style.brush }
-                  : item.drawing.style.brush.TAG === "Textured"
-                    ? { ...item.drawing.style.brush }
-                    : item.drawing.style.brush,
-            },
-            transform: item.drawing.transform.slice(),
-          },
-          masks: item.masks.map((item) => ({
-            ...item,
-            points: item.points.map((item) => ({ ...item })),
-            transform: item.transform.slice(),
-          })),
-        }));
+        result = Surface.paintSnapshot(surface, value, false);
       } finally {
-        $unborrow(borrow);
+        $unborrow(value);
       }
-      return { ...props, elements };
     }
-    const snapshot = shown ?? fallback();
-    const paintSnapshot = Surface.paintSnapshot(surface, snapshot, replaying);
-    if (paintSnapshot.TAG === "Err") {
-      surface.setProblem(paintSnapshot._0);
+    if (result.TAG === "Err") {
+      surface.setProblem(result._0);
     }
   },
   paintSnapshot(surface, snapshot, replaying) {
@@ -559,248 +454,6 @@ export const Surface = {
       }));
       $borrowMut($fieldCell(surface, "shown")).value = { ...props, elements };
     }
-    const visible = {
-      ...snapshot,
-      elements: snapshot.elements.map((item) => ({
-        ...item,
-        drawing: {
-          ...item.drawing,
-          geometry:
-            item.drawing.geometry.TAG === "Stroke"
-              ? {
-                  ...item.drawing.geometry,
-                  points: item.drawing.geometry.points.map((item) => ({ ...item })),
-                }
-              : item.drawing.geometry.TAG === "Path"
-                ? {
-                    ...item.drawing.geometry,
-                    segments: item.drawing.geometry.segments.map((item) =>
-                      item.TAG === "M"
-                        ? { ...item }
-                        : item.TAG === "L"
-                          ? { ...item }
-                          : item.TAG === "Q"
-                            ? { ...item }
-                            : item.TAG === "C"
-                              ? { ...item }
-                              : item,
-                    ),
-                  }
-                : item.drawing.geometry.TAG === "Text"
-                  ? { ...item.drawing.geometry }
-                  : item.drawing.geometry,
-          clip:
-            item.drawing.clip == null
-              ? item.drawing.clip
-              : {
-                  ...item.drawing.clip,
-                  segments: item.drawing.clip.segments.map((item) =>
-                    item.TAG === "M"
-                      ? { ...item }
-                      : item.TAG === "L"
-                        ? { ...item }
-                        : item.TAG === "Q"
-                          ? { ...item }
-                          : item.TAG === "C"
-                            ? { ...item }
-                            : item,
-                  ),
-                  transform: item.drawing.clip.transform.slice(),
-                },
-          style: {
-            ...item.drawing.style,
-            stroke:
-              item.drawing.style.stroke.TAG === "Color"
-                ? { ...item.drawing.style.stroke }
-                : item.drawing.style.stroke.TAG === "Gradient"
-                  ? {
-                      ...item.drawing.style.stroke,
-                      _0:
-                        item.drawing.style.stroke._0.TAG === "Linear"
-                          ? {
-                              ...item.drawing.style.stroke._0,
-                              stops: item.drawing.style.stroke._0.stops.map((item) => ({
-                                ...item,
-                              })),
-                            }
-                          : item.drawing.style.stroke._0.TAG === "Radial"
-                            ? {
-                                ...item.drawing.style.stroke._0,
-                                stops: item.drawing.style.stroke._0.stops.map((item) => ({
-                                  ...item,
-                                })),
-                              }
-                            : item.drawing.style.stroke._0,
-                    }
-                  : item.drawing.style.stroke,
-            fill:
-              item.drawing.style.fill == null
-                ? item.drawing.style.fill
-                : item.drawing.style.fill.TAG === "Color"
-                  ? { ...item.drawing.style.fill }
-                  : item.drawing.style.fill.TAG === "Gradient"
-                    ? {
-                        ...item.drawing.style.fill,
-                        _0:
-                          item.drawing.style.fill._0.TAG === "Linear"
-                            ? {
-                                ...item.drawing.style.fill._0,
-                                stops: item.drawing.style.fill._0.stops.map((item) => ({
-                                  ...item,
-                                })),
-                              }
-                            : item.drawing.style.fill._0.TAG === "Radial"
-                              ? {
-                                  ...item.drawing.style.fill._0,
-                                  stops: item.drawing.style.fill._0.stops.map((item) => ({
-                                    ...item,
-                                  })),
-                                }
-                              : item.drawing.style.fill._0,
-                      }
-                    : item.drawing.style.fill,
-            brush:
-              item.drawing.style.brush.TAG === "Soft"
-                ? { ...item.drawing.style.brush }
-                : item.drawing.style.brush.TAG === "Textured"
-                  ? { ...item.drawing.style.brush }
-                  : item.drawing.style.brush,
-          },
-          transform: item.drawing.transform.slice(),
-        },
-        masks: item.masks.map((item) => ({
-          ...item,
-          points: item.points.map((item) => ({ ...item })),
-          transform: item.transform.slice(),
-        })),
-      })),
-    };
-    if (!replaying) {
-      const borrow = $borrow($fieldCell(surface, "draft"), true);
-      try {
-        if (borrow.value != null) {
-          const captured = borrow.value;
-          $retain(visible.elements, (element) => element.id !== captured.id);
-          visible.elements.push({
-            ...borrow.value,
-            drawing: {
-              ...borrow.value.drawing,
-              geometry:
-                borrow.value.drawing.geometry.TAG === "Stroke"
-                  ? {
-                      ...borrow.value.drawing.geometry,
-                      points: borrow.value.drawing.geometry.points.map((item) => ({ ...item })),
-                    }
-                  : borrow.value.drawing.geometry.TAG === "Path"
-                    ? {
-                        ...borrow.value.drawing.geometry,
-                        segments: borrow.value.drawing.geometry.segments.map((item) =>
-                          item.TAG === "M"
-                            ? { ...item }
-                            : item.TAG === "L"
-                              ? { ...item }
-                              : item.TAG === "Q"
-                                ? { ...item }
-                                : item.TAG === "C"
-                                  ? { ...item }
-                                  : item,
-                        ),
-                      }
-                    : borrow.value.drawing.geometry.TAG === "Text"
-                      ? { ...borrow.value.drawing.geometry }
-                      : borrow.value.drawing.geometry,
-              clip:
-                borrow.value.drawing.clip == null
-                  ? borrow.value.drawing.clip
-                  : {
-                      ...borrow.value.drawing.clip,
-                      segments: borrow.value.drawing.clip.segments.map((item) =>
-                        item.TAG === "M"
-                          ? { ...item }
-                          : item.TAG === "L"
-                            ? { ...item }
-                            : item.TAG === "Q"
-                              ? { ...item }
-                              : item.TAG === "C"
-                                ? { ...item }
-                                : item,
-                      ),
-                      transform: borrow.value.drawing.clip.transform.slice(),
-                    },
-              style: {
-                ...borrow.value.drawing.style,
-                stroke:
-                  borrow.value.drawing.style.stroke.TAG === "Color"
-                    ? { ...borrow.value.drawing.style.stroke }
-                    : borrow.value.drawing.style.stroke.TAG === "Gradient"
-                      ? {
-                          ...borrow.value.drawing.style.stroke,
-                          _0:
-                            borrow.value.drawing.style.stroke._0.TAG === "Linear"
-                              ? {
-                                  ...borrow.value.drawing.style.stroke._0,
-                                  stops: borrow.value.drawing.style.stroke._0.stops.map((item) => ({
-                                    ...item,
-                                  })),
-                                }
-                              : borrow.value.drawing.style.stroke._0.TAG === "Radial"
-                                ? {
-                                    ...borrow.value.drawing.style.stroke._0,
-                                    stops: borrow.value.drawing.style.stroke._0.stops.map(
-                                      (item) => ({ ...item }),
-                                    ),
-                                  }
-                                : borrow.value.drawing.style.stroke._0,
-                        }
-                      : borrow.value.drawing.style.stroke,
-                fill:
-                  borrow.value.drawing.style.fill == null
-                    ? borrow.value.drawing.style.fill
-                    : borrow.value.drawing.style.fill.TAG === "Color"
-                      ? { ...borrow.value.drawing.style.fill }
-                      : borrow.value.drawing.style.fill.TAG === "Gradient"
-                        ? {
-                            ...borrow.value.drawing.style.fill,
-                            _0:
-                              borrow.value.drawing.style.fill._0.TAG === "Linear"
-                                ? {
-                                    ...borrow.value.drawing.style.fill._0,
-                                    stops: borrow.value.drawing.style.fill._0.stops.map((item) => ({
-                                      ...item,
-                                    })),
-                                  }
-                                : borrow.value.drawing.style.fill._0.TAG === "Radial"
-                                  ? {
-                                      ...borrow.value.drawing.style.fill._0,
-                                      stops: borrow.value.drawing.style.fill._0.stops.map(
-                                        (item) => ({ ...item }),
-                                      ),
-                                    }
-                                  : borrow.value.drawing.style.fill._0,
-                          }
-                        : borrow.value.drawing.style.fill,
-                brush:
-                  borrow.value.drawing.style.brush.TAG === "Soft"
-                    ? { ...borrow.value.drawing.style.brush }
-                    : borrow.value.drawing.style.brush.TAG === "Textured"
-                      ? { ...borrow.value.drawing.style.brush }
-                      : borrow.value.drawing.style.brush,
-              },
-              transform: borrow.value.drawing.transform.slice(),
-            },
-            masks: borrow.value.masks.map((item) => ({
-              ...item,
-              points: item.points.map((item) => ({ ...item })),
-              transform: item.transform.slice(),
-            })),
-          });
-          const key = (element) => element.order;
-          visible.elements.sort((a, b) => $cmp(key(a), key(b)));
-        }
-      } finally {
-        $unborrow(borrow);
-      }
-    }
     const map = Surface.map(surface);
     const ratio = $f64Min(window.devicePixelRatio, 2);
     const physical = {
@@ -808,54 +461,184 @@ export const Surface = {
       x: map.x * ratio,
       y: map.y * ratio,
     };
-    const result$1 = Renderer.paint(surface.renderer, surface.canvas, visible, physical, true);
-    let result;
-    if (result$1.TAG === "Err") {
-      return result$1;
+    const draft = $borrow($fieldCell(surface, "draft"), true);
+    const then = (draft) => $position(snapshot.elements, (element) => element.id === draft.id);
+    let draftIndex;
+    try {
+      draftIndex = draft.value != null ? then(draft.value) : undefined;
+    } catch (error) {
+      $unborrow(draft);
+      throw error;
     }
-    if (!replaying) {
-      const value = $borrow($fieldCell(surface, "selected"), true);
-      try {
-        if (value.value != null) {
-          const selected = value.value;
-          const element = visible.elements.find((e) => e.id === selected);
-          if (element != null) {
-            const bounds = Render.bounds(element);
-            const result = Render.context(surface.canvas);
-            if (result.TAG !== "Err") {
-              const ctx = result._0;
-              ctx.save();
-              ctx.resetTransform();
-              ctx.transform(physical.scale, 0, 0, physical.scale, physical.x, physical.y);
-              ctx.strokeStyle = "#3d8065";
-              ctx.lineWidth = 1.3 / map.scale;
-              ctx.setLineDash([5 / map.scale, 4 / map.scale]);
-              ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
-              ctx.restore();
-            } else {
-              return result;
+    let result;
+    let isSomeAnd;
+    try {
+      bb222: {
+        bb127: {
+          if (replaying) {
+            const result$1 = Renderer.paint(
+              surface.renderer,
+              surface.canvas,
+              snapshot.elements,
+              physical,
+              true,
+            );
+            if (result$1.TAG !== "Err") {
+              break bb127;
+            }
+            result = result$1;
+          } else {
+            const hidden =
+              draftIndex != null ? $index(snapshot.elements, draftIndex).id : undefined;
+            const cached = $borrowMut($fieldCell(surface, "background"), true);
+            try {
+              const valid =
+                cached.value != null &&
+                cached.value.sequence === snapshot.sequence &&
+                $eq(cached.value.map, physical) &&
+                cached.value.width === surface.canvas.width &&
+                cached.value.height === surface.canvas.height &&
+                cached.value.hidden == hidden;
+              bb216: {
+                if (!valid) {
+                  const canvas =
+                    cached.value?.canvas ??
+                    Render.newCanvas(surface.canvas.width, surface.canvas.height);
+                  if (canvas.width !== surface.canvas.width) {
+                    canvas.width = surface.canvas.width;
+                  }
+                  if (canvas.height !== surface.canvas.height) {
+                    canvas.height = surface.canvas.height;
+                  }
+                  const value =
+                    draftIndex != null ? $slice(snapshot.elements, 0, draftIndex) : undefined;
+                  const result$1 = Renderer.paint(
+                    surface.renderer,
+                    canvas,
+                    value ?? snapshot.elements,
+                    physical,
+                    true,
+                  );
+                  if (result$1.TAG === "Err") {
+                    result = result$1;
+                    break bb216;
+                  }
+                  cached.value = {
+                    sequence: snapshot.sequence,
+                    map: physical,
+                    width: surface.canvas.width,
+                    height: surface.canvas.height,
+                    hidden,
+                    canvas,
+                  };
+                }
+                const result$1 = Render.context(surface.canvas);
+                if (result$1.TAG !== "Err") {
+                  const ctx = result$1._0;
+                  ctx.resetTransform();
+                  ctx.globalAlpha = 1;
+                  ctx.globalCompositeOperation = "source-over";
+                  ctx.drawImage($unwrap(cached.value, "painted background").canvas, 0, 0);
+                  if (draft.value != null) {
+                    const result$1 = Renderer.paintElement(
+                      surface.renderer,
+                      surface.canvas,
+                      draft.value,
+                      physical,
+                    );
+                    if (result$1.TAG === "Err") {
+                      result = result$1;
+                      break bb216;
+                    }
+                  }
+                  // An existing mark keeps its layer order during a drag. Cache only
+                  // the finished prefix, then draw the moving mark and its foreground.
+                  if (draftIndex != null) {
+                    for (const element of $slice(snapshot.elements, (draftIndex + 1) >>> 0)) {
+                      const result$1 = Renderer.paintElement(
+                        surface.renderer,
+                        surface.canvas,
+                        element,
+                        physical,
+                      );
+                      if (result$1.TAG === "Err") {
+                        result = result$1;
+                        break bb216;
+                      }
+                    }
+                  }
+                  break bb127;
+                }
+                result = result$1;
+              }
+            } finally {
+              $unborrow(cached);
             }
           }
+          break bb222;
         }
-      } finally {
-        $unborrow(value);
+        if (!replaying) {
+          const borrow = $borrow($fieldCell(surface, "selected"), true);
+          try {
+            if (borrow.value != null) {
+              const selected = borrow.value;
+              const selected$1 = borrow.value;
+              const element$1 =
+                (draft.value != null && draft.value.id === selected ? draft.value : undefined) ??
+                snapshot.elements.find((element) => element.id === selected$1);
+              if (element$1 != null) {
+                const bounds = Render.bounds(element$1);
+                const result$1 = Render.context(surface.canvas);
+                if (result$1.TAG !== "Err") {
+                  const ctx = result$1._0;
+                  ctx.save();
+                  ctx.resetTransform();
+                  ctx.transform(physical.scale, 0, 0, physical.scale, physical.x, physical.y);
+                  ctx.strokeStyle = "#3d8065";
+                  ctx.lineWidth = 1.3 / map.scale;
+                  ctx.setLineDash([5 / map.scale, 4 / map.scale]);
+                  ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+                  ctx.restore();
+                } else {
+                  result = result$1;
+                  break bb222;
+                }
+              }
+            }
+          } finally {
+            $unborrow(borrow);
+          }
+        }
+        surface.canvas.setAttribute(
+          "data-drafting",
+          String(!replaying && $borrow($fieldCell(surface, "draft")).value != null),
+        );
+        surface.canvas.setAttribute("data-sequence", String(snapshot.sequence));
+        const value$1 = surface.canvas;
+        const value = $borrow(surface.live, true);
+        try {
+          value$1.setAttribute("data-live-sequence", String(value.sequence));
+        } finally {
+          $unborrow(value);
+        }
+        const value$2 = surface.canvas;
+        if (replaying) {
+          isSomeAnd = false;
+        } else {
+          const holds = (draft) => !snapshot.elements.some((element) => element.id === draft.id);
+          isSomeAnd = draft.value != null && holds(draft.value);
+        }
+        value$2.setAttribute(
+          "data-element-count",
+          String((snapshot.elements.length + (isSomeAnd ? 1 : 0)) >>> 0),
+        );
+        surface.canvas.setAttribute("data-playback", replaying ? "replay" : "live");
+        return { TAG: "Ok" };
       }
-    }
-    surface.canvas.setAttribute(
-      "data-drafting",
-      String(!replaying && $borrow($fieldCell(surface, "draft")).value != null),
-    );
-    surface.canvas.setAttribute("data-sequence", String(snapshot.sequence));
-    const canvas = surface.canvas;
-    const value$1 = $borrow(surface.live, true);
-    try {
-      canvas.setAttribute("data-live-sequence", String(value$1.sequence));
     } finally {
-      $unborrow(value$1);
+      $unborrow(draft);
     }
-    surface.canvas.setAttribute("data-element-count", String(visible.elements.length));
-    surface.canvas.setAttribute("data-playback", replaying ? "replay" : "live");
-    return { TAG: "Ok" };
+    return result;
   },
   clearDraft(surface) {
     const borrowMut = $borrowMut($fieldCell(surface, "draft"));
@@ -1158,11 +941,11 @@ export const Surface = {
       },
     ];
     if (brush.tool === "Pen") {
-      const value = Surface.element(surface, brush, {
+      const value$2 = Surface.element(surface, brush, {
         TAG: "Stroke",
         points: points.map((item) => ({ ...item })),
       });
-      $borrowMut($fieldCell(surface, "draft")).value = value;
+      $borrowMut($fieldCell(surface, "draft")).value = value$2;
     }
     surface.pointer = {
       id,

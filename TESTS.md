@@ -7,7 +7,7 @@ Updated 2026-11-14.
 - `bun run test:core`: 14 shared engine tests on native Rust and generated
   JavaScript, including atomicity, version conflicts, idempotence, per-author
   undo/redo, repeated undo/redo ordering, validation, and erasing.
-- `bun run build && bun run test`: 33 Playwright tests against production assets.
+- `bun run build && bun run test`: 38 Playwright tests against production assets.
   Tests exercise real native WebMCP and image pixels, human mouse/touch input,
   shapes/text, selection, clear, exports, partial erasing and transformed masks,
   replay progression/cancellation/reduced motion, concurrent tabs, storage aborts,
@@ -27,3 +27,5 @@ App, Icon, and useTools with no diagnostics. The four React compatibility
 regressions in the downstream patch include native JSON comparisons and object
 copy/identity checks. Deliberately ignoring the texture seed and disabling clipping
 were both caught by the domain/browser regressions before restoring the implementation.
+
+Renderer regressions also cover 700-mark path retention and compositing allocation budgets, reuse of finished art during drawing, affine stroke bounds, wide text, preview layer order, and exact native gradient pixels. See [the before/after profile](docs/performance.md) for the saved-drawing comparison and reproducible CPU/pixel tooling.

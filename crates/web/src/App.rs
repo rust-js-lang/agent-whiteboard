@@ -97,7 +97,7 @@ pub fn App() -> JSX::Element {
                     let fonts = Rc::clone(&drawing);
                     spawn(Box::new(async move {
                         let _ = settle(document.fonts().ready()).await;
-                        fonts.paint();
+                        fonts.fonts_changed();
                     }));
                     let hiding = Rc::clone(&drawing);
                     let hidden = webapi::listener(move |_: &Event| {

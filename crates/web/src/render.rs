@@ -1,13 +1,13 @@
 //! Browser drawing uses the canonical paths produced by board-core.
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use webapi::{
     CanvasRenderingContext2D, HTMLCanvasElement, canvas_contexts, document, path2_d, tags,
 };
 use whiteboard_core::{
-    Brush, Drawing, Element, Geometry, Gradient, Paint, Point, Segment, Snapshot, ink_layers,
+    Brush, Drawing, Element, Geometry, Gradient, Mask, Paint, Point, Segment, Snapshot, ink_layers,
     inverse, mask_data, path_data, segment_data,
 };
 
@@ -50,7 +50,7 @@ pub struct Region {
     pub width: f64,
     pub height: f64,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Mapping {
     pub scale: f64,
     pub x: f64,
@@ -86,44 +86,61 @@ fn transform(ctx: &CanvasRenderingContext2D, matrix: [f64; 6]) {
     ctx.transform(a, b, c, d, e, f);
 }
 
+struct Prepared {
+    drawing: Drawing,
+    masks: Vec<Mask>,
+    path: Option<&'static webapi::Path2D>,
+    ink: Vec<(&'static webapi::Path2D, f64)>,
+    clip: Option<&'static webapi::Path2D>,
+    erasers: Vec<(&'static webapi::Path2D, [f64; 6])>,
+    bounds: Region,
+}
+impl Prepared {
+    fn new(element: &Element) -> Result<Self, String> {
+        let drawing = &element.drawing;
+        Ok(Self {
+            drawing: drawing.clone(),
+            masks: element.masks.clone(),
+            path: if matches!(drawing.geometry, Geometry::Path { .. }) {
+                Some(path2_d::new(Some(&path_data(drawing)?)))
+            } else {
+                None
+            },
+            ink: if matches!(drawing.geometry, Geometry::Stroke { .. }) {
+                ink_layers(drawing)?
+                    .into_iter()
+                    .map(|layer| (path2_d::new(Some(&layer.path)), layer.opacity))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            clip: drawing
+                .clip
+                .as_ref()
+                .map(|clip| path2_d::new(Some(&segment_data(&clip.segments)))),
+            erasers: element
+                .masks
+                .iter()
+                .map(|mask| Ok((path2_d::new(Some(&mask_data(mask)?)), mask.transform)))
+                .collect::<Result<Vec<_>, String>>()?,
+            bounds: bounds(element),
+        })
+    }
+}
 #[derive(Default)]
 pub struct Renderer {
-    paths: RefCell<HashMap<String, &'static webapi::Path2D>>,
-    ink: RefCell<HashMap<String, Vec<(&'static webapi::Path2D, f64)>>>,
+    // One prepared entry per visible element, not a size-triggered whole-cache flush.
+    // Compare content too: a replay's partial mark has the accepted mark's ID/version.
+    prepared: RefCell<HashMap<String, Prepared>>,
+    layer: RefCell<Option<&'static HTMLCanvasElement>>,
+    patch: RefCell<Option<&'static HTMLCanvasElement>>,
 }
 impl Renderer {
-    fn path(&self, drawing: &Drawing) -> Result<&'static webapi::Path2D, String> {
-        let key = serde_json::to_string(drawing).map_err(|e| e.to_string())?;
-        let found = self.paths.borrow().get(&key).copied();
-        if let Some(found) = found {
-            return Ok(found);
-        }
-        let data = path_data(drawing)?;
-        let path = path2_d::new(Some(&data));
-        let mut cache = self.paths.borrow_mut();
-        if cache.len() >= 500 {
-            cache.clear();
-        }
-        cache.insert(key, path);
-        Ok(path)
-    }
-    fn ink(&self, drawing: &Drawing) -> Result<Vec<(&'static webapi::Path2D, f64)>, String> {
-        let key = serde_json::to_string(drawing).map_err(|e| e.to_string())?;
-        if let Some(paths) = self.ink.borrow().get(&key) {
-            return Ok(paths.clone());
-        }
-        let paths = ink_layers(drawing)?
-            .into_iter()
-            .map(|layer| (path2_d::new(Some(&layer.path)), layer.opacity))
-            .collect::<Vec<_>>();
-        let mut cache = self.ink.borrow_mut();
-        if cache.len() >= 500 {
-            cache.clear();
-        }
-        cache.insert(key, paths.clone());
-        Ok(paths)
-    }
-    fn geometry(&self, ctx: &CanvasRenderingContext2D, element: &Element) -> Result<(), String> {
+    fn geometry(
+        ctx: &CanvasRenderingContext2D,
+        element: &Element,
+        prepared: &Prepared,
+    ) -> Result<(), String> {
         let drawing = &element.drawing;
         let style = &drawing.style;
         transform(ctx, drawing.transform);
@@ -132,10 +149,7 @@ impl Renderer {
         ctx.set_line_width(style.width);
         if let Some(clip) = &drawing.clip {
             transform(ctx, clip.transform);
-            ctx.clip_with_path(
-                path2_d::new(Some(&segment_data(&clip.segments))),
-                Some("nonzero"),
-            );
+            ctx.clip_with_path(prepared.clip.expect("prepared clip"), Some("nonzero"));
             transform(ctx, inverse(clip.transform));
         }
         set_paint(ctx, &style.stroke, true);
@@ -143,14 +157,14 @@ impl Renderer {
         match &drawing.geometry {
             Geometry::Stroke { .. } => {
                 set_paint(ctx, &style.stroke, false);
-                for (path, opacity) in self.ink(drawing)? {
-                    ctx.set_global_alpha(opacity);
+                for (path, opacity) in &prepared.ink {
+                    ctx.set_global_alpha(*opacity);
                     ctx.fill_with_path(path, Some("nonzero"));
                 }
                 ctx.set_global_alpha(1.0);
             }
             Geometry::Path { .. } => {
-                let path = self.path(drawing)?;
+                let path = prepared.path.expect("prepared path");
                 if style.fill.is_some() {
                     ctx.fill_with_path(path, Some("nonzero"));
                 }
@@ -165,14 +179,13 @@ impl Renderer {
                 }
             }
         }
-        for mask in &element.masks {
-            let data = mask_data(mask)?;
+        for (path, matrix) in &prepared.erasers {
             ctx.save();
             ctx.set_global_composite_operation("destination-out");
             ctx.set_global_alpha(1.0);
-            transform(ctx, mask.transform);
+            transform(ctx, *matrix);
             ctx.set_fill_style("#000000");
-            ctx.fill_with_path(path2_d::new(Some(&data)), Some("nonzero"));
+            ctx.fill_with_path(path, Some("nonzero"));
             ctx.restore();
         }
         Ok(())
@@ -180,7 +193,7 @@ impl Renderer {
     pub fn paint(
         &self,
         canvas: &'static HTMLCanvasElement,
-        snapshot: &Snapshot,
+        elements: &[Element],
         map: Mapping,
         grid: bool,
     ) -> Result<(), String> {
@@ -208,31 +221,110 @@ impl Renderer {
                 }
             }
         }
-        let mut layer = None;
-        for element in &snapshot.elements {
-            let isolated = !element.masks.is_empty()
-                || element.drawing.style.opacity < 1.0
-                || !matches!(element.drawing.style.brush, Brush::Marker);
-            let destination = if isolated {
-                let surface = *layer.get_or_insert_with(|| new_canvas(width, height));
-                surface.set_width(width);
-                surface.set_height(height);
-                context(surface)?
-            } else {
-                ctx
-            };
-            destination.save();
-            apply_mapping(destination, map);
-            self.geometry(destination, element)?;
-            destination.restore();
-            if isolated && let Some(surface) = layer {
-                ctx.save();
-                ctx.reset_transform();
-                ctx.set_global_alpha(element.drawing.style.opacity);
-                ctx.draw_image(surface, 0.0, 0.0, None, None);
-                ctx.restore();
-            }
+        let ids = elements
+            .iter()
+            .map(|element| element.id.as_str())
+            .collect::<HashSet<_>>();
+        self.prepared
+            .borrow_mut()
+            .retain(|id, _| ids.contains(id.as_str()));
+        for element in elements {
+            self.paint_element(canvas, element, map)?;
         }
+        Ok(())
+    }
+    pub fn paint_element(
+        &self,
+        canvas: &'static HTMLCanvasElement,
+        element: &Element,
+        map: Mapping,
+    ) -> Result<(), String> {
+        let mut cache = self.prepared.borrow_mut();
+        if cache.get(&element.id).is_none_or(|prepared| {
+            prepared.drawing != element.drawing || prepared.masks != element.masks
+        }) {
+            cache.insert(element.id.clone(), Prepared::new(element)?);
+        }
+        let prepared = cache.get(&element.id).expect("prepared drawing");
+        let ctx = context(canvas)?;
+        let isolated = !element.masks.is_empty()
+            || element.drawing.style.opacity < 1.0
+            || !matches!(element.drawing.style.brush, Brush::Marker);
+        if !isolated {
+            ctx.save();
+            apply_mapping(ctx, map);
+            Self::geometry(ctx, element, prepared)?;
+            ctx.restore();
+            return Ok(());
+        }
+        // Keep the surface origin and mapping unchanged for pixel-identical
+        // rasterization. Clear and composite only the mark's affected rectangle;
+        // pixels left elsewhere in the scratch surface are never copied.
+        // Text uses the full viewport because its extents depend on the font.
+        let b = prepared.bounds;
+        let (left, top, right, bottom) =
+            if matches!(element.drawing.geometry, Geometry::Text { .. }) {
+                (0.0, 0.0, canvas.width(), canvas.height())
+            } else {
+                (
+                    (b.x * map.scale + map.x - 2.0).floor().max(0.0),
+                    (b.y * map.scale + map.y - 2.0).floor().max(0.0),
+                    ((b.x + b.width) * map.scale + map.x + 2.0)
+                        .ceil()
+                        .min(canvas.width()),
+                    ((b.y + b.height) * map.scale + map.y + 2.0)
+                        .ceil()
+                        .min(canvas.height()),
+                )
+            };
+        if right <= left || bottom <= top {
+            return Ok(());
+        }
+        let mut layer = self.layer.borrow_mut();
+        let surface = *layer.get_or_insert_with(|| new_canvas(canvas.width(), canvas.height()));
+        if surface.width() != canvas.width() {
+            surface.set_width(canvas.width());
+        }
+        if surface.height() != canvas.height() {
+            surface.set_height(canvas.height());
+        }
+        let destination = context(surface)?;
+        destination.reset_transform();
+        destination.clear_rect(left, top, right - left, bottom - top);
+        destination.save();
+        apply_mapping(destination, map);
+        Self::geometry(destination, element, prepared)?;
+        destination.restore();
+        // Copy the affected pixels at full opacity first. Applying opacity to a
+        // source-rectangle draw can change browser color rounding; the final
+        // full-image draw below retains the original compositing operation.
+        let mut patch = self.patch.borrow_mut();
+        let patch = *patch.get_or_insert_with(|| new_canvas(right - left, bottom - top));
+        if patch.width() != right - left {
+            patch.set_width(right - left);
+        }
+        if patch.height() != bottom - top {
+            patch.set_height(bottom - top);
+        }
+        let cropped = context(patch)?;
+        cropped.set_global_composite_operation("copy");
+        cropped.set_image_smoothing_enabled(false);
+        cropped.draw_image_with_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+            surface,
+            left,
+            top,
+            right - left,
+            bottom - top,
+            0.0,
+            0.0,
+            right - left,
+            bottom - top,
+        );
+        ctx.save();
+        ctx.reset_transform();
+        ctx.set_global_alpha(element.drawing.style.opacity);
+        ctx.draw_image(patch, left, top, None, None);
+        ctx.restore();
         Ok(())
     }
 }
@@ -279,7 +371,7 @@ pub async fn capture(
     let canvas = new_canvas(region.width * scale, region.height * scale);
     Renderer::default().paint(
         canvas,
-        snapshot,
+        &snapshot.elements,
         Mapping {
             scale,
             x: -region.x * scale,
@@ -358,12 +450,14 @@ pub fn bounds(element: &Element) -> Region {
         .iter()
         .map(|p| p.1)
         .fold(f64::NEG_INFINITY, f64::max);
-    let pad = element.drawing.style.width;
+    // Affine scale/shear also scales stroke width. Use conservative row norms.
+    let pad_x = element.drawing.style.width * a.hypot(c);
+    let pad_y = element.drawing.style.width * b.hypot(d);
     Region {
-        x: min_x - pad,
-        y: min_y - pad,
-        width: max_x - min_x + pad * 2.0,
-        height: max_y - min_y + pad * 2.0,
+        x: min_x - pad_x,
+        y: min_y - pad_y,
+        width: max_x - min_x + pad_x * 2.0,
+        height: max_y - min_y + pad_y * 2.0,
     }
 }
 pub fn hit(snapshot: &Snapshot, point: &Point, tolerance: f64) -> Option<Element> {
